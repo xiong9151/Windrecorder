@@ -242,10 +242,12 @@ def embed_vid_file(
     if len(img_db_recorded_dict) == 0:
         logger.info(f"{vid_file_name}: no record in OCR db")
         return False
+    else:
+        logger.debug(f"{vid_file_name}: found {len(img_db_recorded_dict)} records in OCR db")
 
     if "-SCREENSHOTS" in vid_file_name:
-        for k, v in img_db_recorded_dict.items():
-            img_db_recorded_dict[k] = os.path.join(v.split("\\")[0], v.split("\\")[1] + "-VIDEO", v.split("\\")[2])
+        # 对于截图缓存视频，picturefile_name 可能是完整相对路径或仅文件名
+        # 首先尝试直接使用完整路径（相对于工作目录）
         all_screenshot_paths_exist = True
         for img_filepath in list(img_db_recorded_dict.values()):
             if not os.path.exists(img_filepath):
@@ -254,89 +256,61 @@ def embed_vid_file(
                 break
 
         if all_screenshot_paths_exist:
-            # 所有截图路径都存在，使用原有的逻辑
+            # 所有截图路径都存在，直接使用完整路径
             embed_img_in_iframe_by_rowid_dict(
                 model_image=model_image,
                 processor_image=processor_image,
                 img_dict=img_db_recorded_dict,
-                img_dir_filepath="",
+                img_dir_filepath="",  # 空字符串，因为 img_filename 已经是完整路径
                 vdb=vdb,
                 enable_find_closest_img_strategy=False,
             )
         else:
-            # 截图路径不存在，回退到从视频中提取帧的逻辑
-            logger.info(f"Screenshot cache not found for {vid_file_name}, falling back to extracting frames from video.")
+            # 尝试第二种策略：假设 picturefile_name 是相对于截图缓存目录的路径
+            # 提取视频日期部分用于构建截图缓存目录
+            video_date_part = vid_file_name[:19]  # "2025-10-26_21-56-55"
+            screenshot_cache_base_dir = "cache_screenshot"
+            screenshot_cache_dir = os.path.join(screenshot_cache_base_dir, video_date_part)
             
-            # 使用与普通视频相同的处理逻辑
-            iframe_sub_path = os.path.join(iframe_path, os.path.splitext(vid_file_name)[0][:19])  # 取文件名的日期部分
-            iframe_img_list = []
-            if os.path.exists(iframe_sub_path):
-                iframe_img_list = os.listdir(iframe_sub_path)
-
-            if not all(
-                element in iframe_img_list for element in list(img_db_recorded_dict.values())
-            ):  # 检查缓存图像文件是否已存在，否则重新提取
-                # 清理缓存
-                try:
-                    shutil.rmtree(iframe_sub_path)
-                except FileNotFoundError:
-                    pass
-                file_utils.ensure_dir(iframe_sub_path)
-                extract_iframe(video_file=vid_filepath, iframe_path=iframe_sub_path)
-                crop_iframe(iframe_sub_path)  # 提取后需要对图像进行裁剪处理
-
-            # 进行图像嵌入
-            embed_img_in_iframe_by_rowid_dict(
-                model_image=model_image,
-                processor_image=processor_image,
-                img_dict=img_db_recorded_dict,
-                img_dir_filepath=iframe_sub_path,
-                vdb=vdb,
-            )
-            # 清理图像缓存
-            try:
-                shutil.rmtree(iframe_sub_path)
-            except FileNotFoundError:
-                pass
-
-        # 处理截图缓存目录
-        screenshot_cache_dir_path = file_utils.get_screenshots_cache_dir_by_video_file_name(vid_file_name)
-        
-        # 重命名截图缓存目录添加-IMGEMB后缀
-        if screenshot_cache_dir_path and os.path.exists(screenshot_cache_dir_path):
-            # 检查目录是否已经包含-IMGEMB后缀
-            if "-IMGEMB" not in screenshot_cache_dir_path:
-                try:
-                    # 检查目录是否已经被重命名为包含-VIDEO后缀
-                    if "-VIDEO" in screenshot_cache_dir_path:
-                        # 如果已经是-VIDEO后缀，替换为-VIDEO-IMGEMB
-                        new_dir_path = screenshot_cache_dir_path.replace("-VIDEO", "-VIDEO-IMGEMB")
+            # 检查截图缓存目录是否存在
+            if os.path.exists(screenshot_cache_dir):
+                # 重新构建 img_dict，将 picturefile_name 转换为仅文件名
+                corrected_img_dict = {}
+                for rowid, picturefile_name in img_db_recorded_dict.items():
+                    # 如果 picturefile_name 包含路径分隔符，提取文件名
+                    if "\\" in picturefile_name:
+                        filename_only = os.path.basename(picturefile_name)
                     else:
-                        # 否则直接添加-IMGEMB后缀
-                        new_dir_path = screenshot_cache_dir_path + "-IMGEMB"
-                    
-                    os.rename(screenshot_cache_dir_path, new_dir_path)
-                    logger.info(f"Renamed screenshot cache directory from: {screenshot_cache_dir_path} to: {new_dir_path}")
-                except Exception as e:
-                    logger.error(f"Failed to rename screenshot cache directory {screenshot_cache_dir_path}: {e}")
+                        filename_only = picturefile_name
+                    corrected_img_dict[rowid] = filename_only
+                
+                # 检查所有文件是否存在于截图缓存目录中
+                all_files_exist_in_cache = True
+                for filename in corrected_img_dict.values():
+                    full_path = os.path.join(screenshot_cache_dir, filename)
+                    if not os.path.exists(full_path):
+                        logger.info(f"File {full_path} not found in screenshot cache directory")
+                        all_files_exist_in_cache = False
+                        break
+                
+                if all_files_exist_in_cache:
+                    # 使用截图缓存目录作为基础路径
+                    embed_img_in_iframe_by_rowid_dict(
+                        model_image=model_image,
+                        processor_image=processor_image,
+                        img_dict=corrected_img_dict,
+                        img_dir_filepath=screenshot_cache_dir,
+                        vdb=vdb,
+                        enable_find_closest_img_strategy=False,
+                    )
+                else:
+                    # 截图缓存目录中的文件也不完整，回退到从视频中提取帧
+                    logger.info(f"Screenshot cache incomplete for {vid_file_name}, falling back to extracting frames from video.")
+                    _fallback_to_video_extraction(model_image, processor_image, vdb, vid_filepath, vid_file_name, iframe_path, img_db_recorded_dict)
             else:
-                logger.info(f"Screenshot cache directory already renamed: {screenshot_cache_dir_path}")
-        else:
-            # 尝试通过其他方式查找截图缓存目录
-            base_video_name = vid_file_name[:19]
-            cache_dirs = file_utils.get_screenshots_cache_dir_lst()
-            matching_dirs = [d for d in cache_dirs if base_video_name in d and "-VIDEO" in d and "-IMGEMB" not in d]
-            if matching_dirs:
-                dir_to_rename = matching_dirs[0]
-                try:
-                    new_dir_path = dir_to_rename + "-IMGEMB"
-                    os.rename(dir_to_rename, new_dir_path)
-                    logger.info(f"Renamed screenshot cache directory from: {dir_to_rename} to: {new_dir_path}")
-                except Exception as e:
-                    logger.error(f"Failed to rename screenshot cache directory {dir_to_rename}: {e}")
-            else:
-                logger.warning(f"Screenshot cache directory not found or doesn't exist for video: {vid_file_name}")
-
+                # 截图缓存目录不存在，回退到从视频中提取帧
+                logger.info(f"Screenshot cache directory not found for {vid_file_name}, falling back to extracting frames from video.")
+                _fallback_to_video_extraction(model_image, processor_image, vdb, vid_filepath, vid_file_name, iframe_path, img_db_recorded_dict)
     else:
         # 判断是否存在图片缓存文件，若无则提取
         iframe_sub_path = os.path.join(iframe_path, os.path.splitext(vid_file_name)[0][:19])  # FIXME 硬编码取了文件名的日期范围
@@ -381,6 +355,60 @@ def embed_vid_file(
     return True
 
 
+def _fallback_to_video_extraction(model_image, processor_image, vdb, vid_filepath, vid_file_name, iframe_path, img_db_recorded_dict):
+    """回退到从视频中提取帧的逻辑"""
+    iframe_sub_path = os.path.join(iframe_path, os.path.splitext(vid_file_name)[0][:19])  # 取文件名的日期部分
+    
+    # 清理现有缓存
+    try:
+        shutil.rmtree(iframe_sub_path)
+    except FileNotFoundError:
+        pass
+    file_utils.ensure_dir(iframe_sub_path)
+    
+    # 从视频中提取帧
+    extract_iframe(video_file=vid_filepath, iframe_path=iframe_sub_path)
+    crop_iframe(iframe_sub_path)  # 提取后需要对图像进行裁剪处理
+    
+    # 获取所有裁剪后的帧文件
+    iframe_img_list = []
+    if os.path.exists(iframe_sub_path):
+        iframe_img_list = [f for f in os.listdir(iframe_sub_path) if f.endswith('_cropped.jpg')]
+    
+    if not iframe_img_list:
+        logger.warning(f"No frames extracted from video {vid_file_name}")
+        return
+    
+    # 创建新的映射：使用数据库中的 rowid，但分配实际存在的帧文件
+    # 由于无法精确匹配时间戳，我们按顺序分配帧文件
+    sorted_iframe_files = sorted(iframe_img_list)
+    db_rowids = sorted(img_db_recorded_dict.keys())
+    
+    # 如果帧文件数量少于数据库记录，只处理前 N 个
+    min_count = min(len(sorted_iframe_files), len(db_rowids))
+    
+    fallback_img_dict = {}
+    for i in range(min_count):
+        rowid = db_rowids[i]
+        iframe_file = sorted_iframe_files[i]
+        fallback_img_dict[rowid] = iframe_file
+    
+    # 进行图像嵌入
+    embed_img_in_iframe_by_rowid_dict(
+        model_image=model_image,
+        processor_image=processor_image,
+        img_dict=fallback_img_dict,
+        img_dir_filepath=iframe_sub_path,
+        vdb=vdb,
+    )
+    
+    # 清理图像缓存
+    try:
+        shutil.rmtree(iframe_sub_path)
+    except FileNotFoundError:
+        pass
+
+
 def all_videofile_do_img_embedding_routine(video_queue_batch=14):
     """
     流程：处理未嵌入的视频，提取嵌入视频 iframe embedding 到向量数据库。默认计算时间控制在 30 分钟左右内（即索引 12~15 个视频）
@@ -403,8 +431,11 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
             try:
                 vdb = VectorDatabase(vdb_filename=get_vdb_filename_via_video_filename(video_name))
                 print(f"embedding {video_name}")
-                embed_vid_file(model_image=model_image, processor_image=processor_image, vdb=vdb, vid_file_name=video_name)
-                video_process_count += 1
+                success = embed_vid_file(model_image=model_image, processor_image=processor_image, vdb=vdb, vid_file_name=video_name)
+                if success:
+                    video_process_count += 1
+                else:
+                    logger.warning(f"Failed to embed video {video_name}, skipped.")
             except Exception as e:
                 logger.error(f"处理视频 {video_name} 时出错: {e}")
                 continue
