@@ -749,6 +749,7 @@ def rollback_data(vid_file_name):
     db_manager.db_rollback_delete_video_refer_record(vid_file_name)
 
 
+# 对某个视频进行处理的过程
 def ocr_core_logic(file_path, vid_file_name, iframe_path):
     """
     vid_file_name just for db index, make sure no suffix tag
@@ -942,7 +943,20 @@ def ocr_process_single_video(video_path, vid_file_name, iframe_path, optimize_fo
             f.write(f'{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}\n{e}')
     else:
         logger.info("Add tags to video file")
-        new_file_path = file_path.replace("-INDEX", "-OCRED")
+        # 检查是否实际有OCR数据写入数据库
+        # 提取视频时间戳用于数据库查询
+        vid_timestamp = vid_file_name[:19]
+        df_check = db_manager.db_get_row_from_vid_filename(vid_file_name)
+        
+        if len(df_check) > 0:
+            # 有有效的OCR数据，使用正常的-OCRED标签
+            new_file_path = file_path.replace("-INDEX", "-OCRED")
+            logger.info(f"Video has valid OCR data, using -OCRED tag")
+        else:
+            # 没有有效的OCR数据，使用特殊标签-OCRED-NODATA
+            new_file_path = file_path.replace("-INDEX", "-OCRED-NODATA")
+            logger.info(f"Video has no valid OCR data, using -OCRED-NODATA tag")
+            
         os.rename(file_path, new_file_path)
         logger.info(f"--------- {file_path} Finished! ---------")
     finally:

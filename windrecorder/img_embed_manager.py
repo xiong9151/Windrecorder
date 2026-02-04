@@ -426,7 +426,7 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
             # 如果视频被压缩了，目前跳过；TODO 未来如果使用时间戳手段提取、或者可以接受iframe提取的时域误差，则不需要这条规则了
             if "-OCRED" not in video_name:
                 continue
-            if "-IMGEMB" in video_name or "-COMPRESS" in video_name:
+            if "-IMGEMB" in video_name or "-COMPRESS" in video_name or "-NODATA" in video_name:
                 continue
             try:
                 vdb = VectorDatabase(vdb_filename=get_vdb_filename_via_video_filename(video_name))
@@ -435,7 +435,38 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
                 if success:
                     video_process_count += 1
                 else:
-                    logger.warning(f"Failed to embed video {video_name}, skipped.")
+                    # 检查是否是因为没有OCR记录导致的失败
+                    # 如果是普通视频（非SCREENSHOTS）且没有OCR记录，自动清理OCR标签
+                    if "-SCREENSHOTS" not in video_name:
+                        # 查询数据库确认是否有记录
+                        df_video_related = db_manager.db_get_row_from_vid_filename(video_name)
+                        if len(df_video_related) == 0:
+                            logger.warning(f"Video {video_name} has OCR tag but no OCR records in database. Removing OCR tag.")
+                            # 构建完整的视频文件路径
+                            video_subdir = file_utils.convert_vid_filename_as_YYYY_MM(video_name)
+                            old_filepath = os.path.join(config.record_videos_dir_ud, video_subdir, video_name)
+                            new_filepath = old_filepath
+                            # 移除所有可能的OCR相关标签
+                            if "-OCRED-NODATA" in old_filepath:
+                                new_filepath = old_filepath.replace("-OCRED-NODATA", "")
+                            elif "-NODATA" in old_filepath:
+                                # 处理可能的其他-NODATA组合
+                                new_filepath = old_filepath.replace("-NOData", "").replace("-NODATA", "")
+                            elif "-OCRED" in old_filepath:
+                                new_filepath = old_filepath.replace("-OCRED", "")
+                            
+                            if new_filepath != old_filepath:
+                                try:
+                                    os.rename(old_filepath, new_filepath)
+                                    logger.info(f"Successfully removed OCR tag from {video_name}")
+                                except Exception as rename_error:
+                                    logger.error(f"Failed to remove OCR tag from {video_name}: {rename_error}")
+                            else:
+                                logger.warning(f"No OCR tag found to remove from {video_name}")
+                        else:
+                            logger.warning(f"Failed to embed video {video_name}, skipped.")
+                    else:
+                        logger.warning(f"Failed to embed video {video_name}, skipped.")
             except Exception as e:
                 logger.error(f"处理视频 {video_name} 时出错: {e}")
                 continue
