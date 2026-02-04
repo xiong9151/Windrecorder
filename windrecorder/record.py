@@ -66,8 +66,46 @@ def record_screen_via_ffmpeg(
         for i in range(len(lst)):
             if lst[i] == "CRF_NUM":
                 lst[i] = f"{config.record_crf}"
-            elif lst[i] == "BITRATE":
-                lst[i] = f"{bitrate_displays_factor}k"
+            elif lst[i] == "FRAMERATE":
+                lst[i] = f"{framerate}"
+            elif lst[i] == "VIDEOSIZE":
+                if record_range_args:
+                    # 从record_range_args中提取视频尺寸
+                    for j in range(len(record_range_args)):
+                        if record_range_args[j] == "-video_size" and j + 1 < len(record_range_args):
+                            lst[i] = record_range_args[j + 1]
+                            break
+                else:
+                    # 如果没有指定录制范围，则使用整个桌面的尺寸
+                    desktop_size = utils.get_display_info()[0]  # 获取主显示器信息
+                    lst[i] = f"{desktop_size['width']}x{desktop_size['height']}"
+            elif lst[i] == "OFFSETX":
+                if record_range_args:
+                    # 从record_range_args中提取偏移X坐标
+                    for j in range(len(record_range_args)):
+                        if record_range_args[j] == "-offset_x" and j + 1 < len(record_range_args):
+                            lst[i] = record_range_args[j + 1]
+                            break
+                else:
+                    lst[i] = "0"
+            elif lst[i] == "OFFSETY":
+                if record_range_args:
+                    # 从record_range_args中提取偏移Y坐标
+                    for j in range(len(record_range_args)):
+                        if record_range_args[j] == "-offset_y" and j + 1 < len(record_range_args):
+                            lst[i] = record_range_args[j + 1]
+                            break
+                else:
+                    lst[i] = "0"
+            elif lst[i] == "PRESET_VAL":
+                # 使用默认的veryfast预设，如果需要可以扩展为配置项
+                lst[i] = "veryslow"
+            elif lst[i] == "PLUGIN_VAL":
+                # 使用默认的hevc_hw插件，如果需要可以扩展为配置项
+                lst[i] = "hevc_hw"
+            elif lst[i] == "PIX_FMT_VAL":
+                # 使用默认的nv12格式，如果需要可以扩展为配置项
+                lst[i] = "nv12"
         return lst
 
     display_info = utils.get_display_info()
@@ -95,6 +133,7 @@ def record_screen_via_ffmpeg(
             CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], int(config.record_bitrate) * (len(display_info) - 1)
         )
 
+    captureblt_args = ["-draw_mouse", "0", "-show_region", "0"]
     ffmpeg_cmd = [
         config.ffmpeg_path,
         "-hwaccel",
@@ -104,6 +143,7 @@ def record_screen_via_ffmpeg(
         "-framerate",
         f"{framerate}",
         *record_range_args,
+        *captureblt_args,
         "-i",
         "desktop",
         *record_encoder_args,
@@ -113,7 +153,7 @@ def record_screen_via_ffmpeg(
         out_path,
     ]
 
-    # 执行命令
+        # 执行命令
     try:
         logger.info(f"record_screen: ffmpeg cmd: {ffmpeg_cmd}")
         # 运行ffmpeg
@@ -129,9 +169,16 @@ def record_screen_via_ffmpeg(
 def is_recording():
     try:
         with open(config.record_lock_path, encoding="utf-8") as f:
-            check_pid = int(f.read())
+            content = f.read().strip()
+            if not content:
+                logger.error("record: Screen recording service file lock is empty.")
+                return False
+            check_pid = int(content)
     except FileNotFoundError:
         logger.error("record: Screen recording service file lock does not exist.")
+        return False
+    except ValueError:
+        logger.error(f"record: Screen recording service file lock contains invalid data: {repr(content)}")
         return False
 
     return utils.is_process_running(check_pid, "python.exe")
@@ -152,8 +199,28 @@ def compress_video_CLI(video_path, target_width, target_height, encoder, crf_fla
     else:
         threads_param = ""
 
+    # 检查是否需要预缩放以适应硬件编码器的限制
+    scale_filter = f"scale={target_width}:{target_height}"
+    max_width = target_width
+    max_height = target_height
+    
+    # 对于特定硬件编码器，如果目标分辨率超过限制，则先进行预缩放
+    if encoder in ["hevc_qsv", "h264_qsv"] and (target_width > 2048 or target_height > 2048):
+        # Intel QSV编码器对某些编解码器有分辨率限制(最大2048)
+        scale_factor = min(2048 / target_width, 2048 / target_height)
+        max_width = int(target_width * scale_factor)
+        max_height = int(target_height * scale_factor)
+        # 先使用scale过滤器调整到合适尺寸，再进行最终缩放
+        scale_filter = f"scale={max_width}:{max_height},scale={target_width}:{target_height}"
+    elif encoder in ["hevc_nvenc", "h264_nvenc"] and (target_width > 4096 or target_height > 4096):
+        # NVIDIA NVENC对某些编解码器有分辨率限制(最大4096)
+        scale_factor = min(4096 / target_width, 4096 / target_height)
+        max_width = int(target_width * scale_factor)
+        max_height = int(target_height * scale_factor)
+        scale_filter = f"scale={max_width}:{max_height},scale={target_width}:{target_height}"
+
     compress_cmd = (
-        f'ffmpeg -hwaccel auto -i "{video_path}" -vf scale={target_width}:{target_height} '
+        f'ffmpeg -hwaccel auto -i "{video_path}" -vf {scale_filter} '
         f'{threads_param} -c:v {encoder} {crf_flag} {crf} -preset medium -pix_fmt yuv420p -y "{output_path}"'
     )
 
@@ -282,7 +349,7 @@ def encode_preset_benchmark_test(scale_factor, crf, cpu_threads=None):
     # 准备测试环境
     test_env_folder = "cache\\encode_preset_benchmark_test"
     if os.path.exists(test_env_folder):
-        shutil.rmtree(test_env_folder)
+        file_utils.delete_files_via_config(test_env_folder)  # 使用统一删除方法
     os.makedirs(test_env_folder)
 
     # 执行测试压缩
@@ -355,7 +422,7 @@ def encode_preset_benchmark_test(scale_factor, crf, cpu_threads=None):
 def record_encode_preset_benchmark_test():
     test_env_folder = "cache\\record_preset_benchmark_test"
     if os.path.exists(test_env_folder):
-        shutil.rmtree(test_env_folder)
+        file_utils.delete_files_via_config(test_env_folder)  # 使用统一删除方法
     os.makedirs(test_env_folder)
 
     df_result = pd.DataFrame(columns=["encoder preset", "support"])
@@ -713,6 +780,7 @@ def clean_cache_screenshots_dir_process():
     for dir_path in dir_lst:
         if "-VIDEO" in dir_path and "-IMGEMB" in dir_path:
             file_utils.delete_files_via_config(dir_path)
+            logger.info(f"Directly deleted (VIDEO+IMGEMB): {dir_path}")
         elif "-VIDEO" in dir_path or any(os.path.basename(dir_path)[:19] in word for word in video_lst):
             if datetime.datetime.now() - utils.dtstr_to_datetime(os.path.basename(dir_path)[:19]) > datetime.timedelta(
                 days=outdate_day
@@ -720,8 +788,10 @@ def clean_cache_screenshots_dir_process():
                 file_utils.delete_files_via_config(dir_path)
         elif not os.path.exists(os.path.join(dir_path, SCREENSHOT_CACHE_FILEPATH_TMP_DB_ALL_FILES_NAME)):
             file_utils.delete_files_via_config(dir_path)
+            logger.info(f"Directly deleted (missing DB): {dir_path}")
         elif "-DISCARD" in dir_path:
             file_utils.delete_files_via_config(dir_path)
+            logger.info(f"Directly deleted (DISCARD): {dir_path}")
 
 
 def get_screenshot_foreground_window():
@@ -802,23 +872,29 @@ def convert_screenshots_dir_into_same_size_to_cache(
     logger.debug("uniform screenshots size...")
     # 查找最大的图片尺寸
     max_width, max_height = 0, 0
+    image_files = []
     for img_name in os.listdir(src_folder):
         if not img_name.lower().endswith((".png", ".jpg", ".jpeg")) or "_cropped" in img_name or "_error" in img_name:
             continue
+        image_files.append(img_name)
         img_path = os.path.join(src_folder, img_name)
         with Image.open(img_path) as img:
             width, height = img.size
             max_width, max_height = max(max_width, width), max(max_height, height)
 
     # 调整图片大小并保存
-    for img_name in os.listdir(src_folder):
-        if not img_name.lower().endswith((".png", ".jpg", ".jpeg")) or "_cropped" in img_name or "_error" in img_name:
-            continue
+    total_files = len(image_files)
+    for i, img_name in enumerate(image_files):
+        if i % 10 == 0:  # 每处理10张图片显示一次进度
+            logger.debug(f"Processing image resizing: {i}/{total_files}")
+            
         img_path = os.path.join(src_folder, img_name)
         logger.debug(f"process screenshots size: {img_path}")
         try:
             with Image.open(img_path) as img:
                 width, height = img.size
+                if width == max_width and height == max_height:
+                    continue  # 尺寸已经匹配，无需调整
                 new_img = Image.new("RGB", (max_width, max_height), color=canvas_color)
                 x = (max_width - width) // 2
                 y = (max_height - height) // 2
@@ -865,9 +941,16 @@ def make_screenshots_into_video_via_dir_path(saved_dir_filepath):
     def create_video_from_images(tmp_db_json_datalist, output_video):
         logger.info(f"converting screenshots into video {output_video}...")
         pic_timestamp_mapping = calc_screenshot_time_to_video_time(tmp_db_json_datalist)
+        
+        total_frames = len(pic_timestamp_mapping)
+        logger.info(f"Total frames to process: {total_frames}")
 
         # 假定所有图片大小相同，获取第一张图片的尺寸来设置视频的分辨率
         frame = cv2.imread(pic_timestamp_mapping[0]["screenshot_saved_filepath"])
+        if frame is None:
+            logger.error(f"Failed to read first frame: {pic_timestamp_mapping[0]['screenshot_saved_filepath']}")
+            raise ValueError("Cannot read first frame")
+            
         height, width, layers = frame.shape
         video = cv2.VideoWriter(output_video, cv2.VideoWriter_fourcc(*"mp4v"), 1, (width, height))
 
@@ -879,11 +962,16 @@ def make_screenshots_into_video_via_dir_path(saved_dir_filepath):
 
             logger.debug(f"writing frame: {v['screenshot_saved_filepath']}, {duration=}")
             frame = cv2.imread(v["screenshot_saved_filepath"])
+            if frame is None:
+                logger.warning(f"Failed to read frame: {v['screenshot_saved_filepath']}")
+                continue
+                
             for j in range(duration):  # 根据持续时间重复帧
                 video.write(frame)
 
         cv2.destroyAllWindows()
         video.release()
+        logger.info("Video creation completed.")
 
     # main
     # read temp database
@@ -931,3 +1019,86 @@ def try_empty_cache_dir_in_idle_routine():
             file_utils.empty_directory("cache")
     except Exception as e:
         logger.warning(f"empty cache dir fail: {e}")
+        
+# 录制时的编码器预设参数备选列表，按照设备兼容性优先级排序
+# - preset: 编码器预设名称，用于匹配配置文件中的record_encoder
+# - ffmpeg_cmd: FFmpeg录制命令参数列表，使用占位符在实际使用时替换
+# - available: 是否可用（通过编码器支持测试后更新）
+CONFIG_RECORD_PRESET = {
+    # CPU编码器
+    "cpu_h264": {
+        "preset": "cpu_h264",
+        "ffmpeg_cmd": [
+            "-c:v",
+            "libx264",
+            "-r",
+            "CRF_NUM",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        "available": True,
+    },
+    "cpu_h265": {
+        "preset": "cpu_h265",
+        "ffmpeg_cmd": [
+            "-c:v",
+            "libx265",
+            "-r",
+            "CRF_NUM",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        "available": True,
+    },
+    # Intel核显编码器
+    "qsv265": {
+        "preset": "qsv265",
+        "ffmpeg_cmd": [
+            "-c:v",
+            "hevc_qsv",
+            "-global_quality",
+            "CRF_NUM",
+            "-r",
+            "FRAMERATE",
+            "-preset",
+            "veryslow",
+            "-pix_fmt",
+            "nv12",
+        ],
+        "available": True,
+    },
+    # NVIDIA显卡编码器
+    "NVIDIA_h265": {
+        "preset": "NVIDIA_h265",
+        "ffmpeg_cmd": [
+            "-c:v",
+            "hevc_nvenc",
+            "-r",
+            "CRF_NUM",
+            "-preset",
+            "p1",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        "available": True,
+    },
+    # AV1编码器
+    "SVT-AV1": {
+        "preset": "SVT-AV1",
+        "ffmpeg_cmd": [
+            "-c:v",
+            "libsvtav1",
+            "-r",
+            "CRF_NUM",
+            "-preset",
+            "8",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        "available": True,
+    },
+}

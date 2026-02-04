@@ -13,5 +13,8 @@
     },
     "SVT-AV1":{
         "ffmpeg_cmd":["-c:v", "libsvtav1", "-b:v", "BITRATE", "-svtav1-params", "fast-decode=1:tbr=400k:rc=1:preset=13:scm=1:lp=4:lookahead=0"]
+    },
+    "qsv265": {
+        "ffmpeg_cmd": ["-c:v", "hevc_qsv", "-b:v", "BITRATE", "-preset", "veryslow", "-global_quality", "39", "-load_plugin", "hevc_hw", "-pix_fmt", "nv12"]
     }
 }

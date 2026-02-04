@@ -39,14 +39,20 @@ try:
         print(e)
         print("   uform 模型似乎下载/获取失败，请检查网络、添加代理或进行重试。")
         print("   uform model seems to have failed to download, please check the network, add a proxy, or try again.")
-        set_config_module_install(False)
+        # set_config_module_install(False)
+        # 记录日志到newlog.txt
+        with open("newlog.txt", "a", encoding="utf-8") as f:
+            f.write(f"[_test_install.py] uform模型下载/获取失败: {e}\n")
 
 except ModuleNotFoundError:
     print("   uform 未成功安装，若重试后仍然安装失败，请复制以上报错信息前往 GitHub issue 进行反馈。")
     print(
         "   uform was not successfully installed. If the installation still fails after retrying, please copy the above error message and send it to GitHub issue for feedback."
     )
-    set_config_module_install(False)
+    # set_config_module_install(False)
+    # 记录日志到newlog.txt
+    with open("newlog.txt", "a", encoding="utf-8") as f:
+        f.write("[_test_install.py] uform未成功安装 ModuleNotFoundError\n")
 
 print(
     """

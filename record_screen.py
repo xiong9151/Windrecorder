@@ -24,13 +24,16 @@ if config.img_embed_module_install:
     try:
         from windrecorder import img_embed_manager
     except ModuleNotFoundError:
-        config.set_and_save_config("img_embed_module_install", False)
+        # config.set_and_save_config("img_embed_module_install", False)
+        # 记录日志到newlog.txt
+        with open("newlog.txt", "a", encoding="utf-8") as f:
+            f.write("[record_screen.py] ModuleNotFoundError异常\n")
         pass  # TODO log here
 
 # 全局状态变量
 monitor_idle_minutes = 0
 last_screenshot_array = None
-idle_maintain_time_gap = datetime.timedelta(minutes=40)  # 与上次闲时维护至少相隔
+idle_maintain_time_gap = datetime.timedelta(minutes=10)  # 与上次闲时维护至少相隔
 idle_maintaining_in_process = False  # 维护中的锁
 
 last_idle_maintain_time = datetime.datetime.now()
@@ -93,6 +96,8 @@ def idle_maintain_process_main():
         ocr_manager.remove_outdated_videofiles(video_queue_batch=config.batch_size_remove_video_in_idle)
         # 压缩过期视频
         record.compress_outdated_videofiles(video_queue_batch=config.batch_size_compress_video_in_idle)
+        # 清理iframe目录
+        record.try_clean_iframe_dir_in_idle_routine()
         # 清理缓存文件夹
         record.try_empty_cache_dir_in_idle_routine()
         # 统计webui footer info

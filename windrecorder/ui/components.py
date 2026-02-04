@@ -96,23 +96,44 @@ def oneday_side_toolbar():
 
 # 读取嵌入模型缓存
 def load_emb_model_cache():
-    if config.img_embed_module_install:
-        try:
-            from windrecorder import img_embed_manager
-
+    """
+    尝试加载图像嵌入模型到缓存中（在多页中共享）
+    """
+    try:
+        if "emb_model_text" not in st.session_state:
             try:
-                if "emb_model_text" not in st.session_state or "emb_model_image" not in st.session_state:
-                    with st.spinner(_t("gs_text_loading_embed_model")):
-                        (
-                            st.session_state["emb_model_text"],
-                            st.session_state["emb_model_image"],
-                            st.session_state["emb_processor_text"],
-                            st.session_state["emb_processor_image"],
-                        ) = img_embed_manager.get_model_and_processor()
+                if config.img_embed_module_install:
+                    try:
+                        # 动态导入img_embed_manager以避免循环导入
+                        from windrecorder import img_embed_manager
+                        
+                        # 显示加载状态
+                        with st.spinner("首次加载图像嵌入模型中，请稍候..."):
+                            (
+                                st.session_state["emb_model_text"],
+                                st.session_state["emb_model_image"],
+                                st.session_state["emb_processor_text"],
+                                st.session_state["emb_processor_image"],
+                            ) = img_embed_manager.get_model_and_processor()
+                            
+                        st.success("图像嵌入模型加载成功!")
+                    except Exception as e:
+                        logger.error(f"Failed to load embedding model: {e}")
+                        st.warning("无法加载图像嵌入模型，请检查网络连接或稍后重试。")
+                        # config.set_and_save_config("img_embed_module_install", False)
+                        # 记录日志到newlog.txt
+                        with open("newlog.txt", "a", encoding="utf-8") as f:
+                            f.write(f"[components.py] 模型加载异常: {e}\n")
             except ModuleNotFoundError:
-                config.set_and_save_config("img_embed_module_install", False)
-        except ModuleNotFoundError:
-            config.set_and_save_config("img_embed_module_install", False)
+                # config.set_and_save_config("img_embed_module_install", False)
+                # 记录日志到newlog.txt
+                with open("newlog.txt", "a", encoding="utf-8") as f:
+                    f.write("[components.py] ModuleNotFoundError异常\n")
+    except ModuleNotFoundError:
+        # config.set_and_save_config("img_embed_module_install", False)
+        # 记录日志到newlog.txt
+        with open("newlog.txt", "a", encoding="utf-8") as f:
+            f.write("[components.py] ModuleNotFoundError异常(外层)\n")
 
 
 # 显示 deep linking

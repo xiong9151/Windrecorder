@@ -25,6 +25,7 @@ import requests
 from PIL import Image
 from win32com.client import Dispatch
 
+from windrecorder.const import DATETIME_FORMAT, DATETIME_FORMAT_PATTERN, DATE_FORMAT
 from windrecorder import __version__, file_utils
 from windrecorder.config import config
 from windrecorder.const import DATETIME_FORMAT, OCR_SUPPORT_CONFIG
@@ -112,6 +113,10 @@ def dtstr_to_seconds(datetime_str):
 
 # 将输入的文件（ %Y-%m-%d_%H-%M-%S str）时间转为datetime
 def dtstr_to_datetime(datetime_str):
+    # 如果字符串包含额外的后缀，先提取符合格式的部分
+    match = re.search(DATETIME_FORMAT_PATTERN, datetime_str)
+    if match:
+        datetime_str = match.group(1)
     datetime_obj = datetime.datetime.strptime(datetime_str, DATETIME_FORMAT)
     return datetime_obj
 

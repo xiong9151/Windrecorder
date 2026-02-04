@@ -17,11 +17,20 @@ from windrecorder.utils import get_text as _t
 
 logger = get_logger(__name__)
 
+# 动态检查模块是否安装
 if config.img_embed_module_install:
     try:
         from windrecorder import img_embed_manager
+
+        IMG_EMBED_MANAGER_AVAILABLE = True
     except ModuleNotFoundError:
-        config.set_and_save_config("img_embed_module_install", False)
+        IMG_EMBED_MANAGER_AVAILABLE = False
+        # config.set_and_save_config("img_embed_module_install", False)
+        # 记录日志到newlog.txt
+        with open("newlog.txt", "a", encoding="utf-8") as f:
+            f.write("[search.py] ModuleNotFoundError异常\n")
+        # 重新导入配置以获取更新后的值
+        from windrecorder.config import config
 
 # 使用 streamlit state 来进行通信
 
@@ -544,6 +553,10 @@ def get_query_synonyms(keyword, lang=config.lang):
     if len(keyword) == 0:
         return empty_list
 
+    # 检查img_embed_manager是否可用
+    if not IMG_EMBED_MANAGER_AVAILABLE:
+        return empty_list
+
     # 读取模型
     components.load_emb_model_cache()
 
@@ -558,11 +571,12 @@ def get_query_synonyms(keyword, lang=config.lang):
         st.session_state.synonyms_words = file_utils.read_txt_as_list(txt_filepath)
 
     # 向量召回
-    keyword_vector = img_embed_manager.embed_text(
-        model_text=st.session_state["emb_model_text"],
-        processor_text=st.session_state["emb_processor_text"],
-        text_query=st.session_state.search_content,
-    )
-    prob_res = st.session_state.synonyms_vdb.search_vector(vector=keyword_vector, k=3)
-    word_res = [st.session_state.synonyms_words[i[0]] for i in prob_res]
+    with st.spinner("处理语义查询中..."):
+        keyword_vector = img_embed_manager.embed_text(
+            model_text=st.session_state["emb_model_text"],
+            processor_text=st.session_state["emb_processor_text"],
+            text_query=st.session_state.search_content,
+        )
+        prob_res = st.session_state.synonyms_vdb.search_vector(vector=keyword_vector, k=3)
+        word_res = [st.session_state.synonyms_words[i[0]] for i in prob_res]
     return word_res

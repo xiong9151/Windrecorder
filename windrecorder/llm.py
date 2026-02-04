@@ -37,9 +37,19 @@ def request_llm_one_shot(
     model=config.open_ai_modelname,
 ):
     try:
+        # 使用更严格的参数控制来避免OpenAI客户端初始化问题
+        import httpx
+        
+        # 创建不带代理设置的http客户端
+        http_client = httpx.Client(
+            timeout=30.0,
+        )
+        
         client = OpenAI(
             api_key=api_key,
             base_url=base_url,
+            http_client=http_client,  # 显式传递http客户端
+            max_retries=2,
         )
         msg = [
             {

@@ -22,6 +22,6 @@ start mshta vbscript:createobject("wscript.shell").run("%~nx0"^&" h",0)^&(window
 
 :begin
 cd /d %~dp0
-for /F "tokens=* USEBACKQ" %%A in (`python -m poetry env info --path`) do call "%%A\Scripts\activate.bat"
+call conda activate py311
 
 python "%~dp0\main.py"

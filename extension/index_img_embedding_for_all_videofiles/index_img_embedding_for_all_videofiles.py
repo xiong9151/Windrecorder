@@ -20,12 +20,18 @@ if config.img_embed_module_install:
     try:
         from windrecorder import img_embed_manager
     except ModuleNotFoundError:
-        config.set_and_save_config("img_embed_module_install", False)
+        # config.set_and_save_config("img_embed_module_install", False)
+        # 记录日志到newlog.txt
+        with open("newlog.txt", "a", encoding="utf-8") as f:
+            f.write("[index_img_embedding_for_all_videofiles.py] ModuleNotFoundError异常\n")
         print("Img Embedding Module seems not installed, please install first.")
         sys.exit()
 else:
-    print("Img Embedding Module seems not installed, please install first.")
-    sys.exit()
+    # print("Img Embedding Module seems not installed, please install first.")
+    # sys.exit()
+    # 记录日志到newlog.txt
+    with open("newlog.txt", "a", encoding="utf-8") as f:
+        f.write("[index_img_embedding_for_all_videofiles.py] img_embed_module_install为False\n")
 
 subprocess.run("title Embedding Img for existing video files", shell=True)
 
@@ -65,18 +71,19 @@ Tip: During the indexing process, you can close the terminal window at any time 
         """
         print(text_intro)
         user_input = input("> ")
+        processed_count = 0
         if user_input.lower() == "y":
-            img_embed_manager.all_videofile_do_img_embedding_routine(video_queue_batch=videos_filepath_filter_num)
-            break
-        if user_input.isdigit():
+            processed_count = img_embed_manager.all_videofile_do_img_embedding_routine(video_queue_batch=videos_filepath_filter_num)
+        elif user_input.isdigit():
             val = int(user_input)
             if 0 < val < videos_filepath_filter_num:
-                img_embed_manager.all_videofile_do_img_embedding_routine(video_queue_batch=val)
-                break
-
+                processed_count = img_embed_manager.all_videofile_do_img_embedding_routine(video_queue_batch=val)
     # subprocess.run("cls", shell=True)
-    print()
-    print("指定的选项下视频已索引完成，你可以在 webui 使用自然语言描述来查找对应图像画面。")
+        print()
+        if processed_count > 0:
+            print(f"已完成索引 {processed_count} 个视频，你可以在 webui 使用自然语言描述来查找对应图像画面。")
+        else:
+            print("未能索引任何视频，请检查是否有满足条件的视频文件。")
 
 
 while True:

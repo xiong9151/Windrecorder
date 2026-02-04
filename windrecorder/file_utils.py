@@ -383,10 +383,15 @@ def delete_files_via_config(target_path):
             logger.info(f"move file to recycle bin: {target_path}")
             send2trash(target_path)
         else:
-            logger.info(f"delete file: {target_path}")
-            operation_success, operation_expection = safe_delete(target_path)
-            if not operation_success:
-                raise Exception(operation_expection)
+            logger.info(f"delete file: {target_path} (permanent)")
+            # 直接删除
+            try:
+                if os.path.isdir(target_path):
+                    shutil.rmtree(target_path)
+                else:
+                    os.remove(target_path)
+            except Exception as e:
+                logger.warning(f"Failed to permanently delete {target_path}: {e}")
     except Exception as e:
         try:
             logger.warning(f"operation failed: {str(e)}, trying to move to recycle bin")

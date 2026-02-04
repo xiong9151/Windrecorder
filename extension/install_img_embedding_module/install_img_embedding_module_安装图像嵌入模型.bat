@@ -3,6 +3,11 @@ echo Loading extension, please stand by.
 echo.
 
 cd /d %~dp0
+
+@REM activate conda environment py311
+call conda activate py311
+
+@REM activate poetry environment
 for /F "tokens=* USEBACKQ" %%A in (`python -m poetry env info --path`) do call "%%A\Scripts\activate.bat"
 chcp 65001
 

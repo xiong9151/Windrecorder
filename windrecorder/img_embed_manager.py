@@ -7,7 +7,7 @@
 # import 前确保 config.img_embed_module_install is True
 # if config.img_embed_module_install:
 #     try:
-#         from windrecorder import img_embed_manager
+#     from windrecorder import img_embed_manager
 #     except ModuleNotFoundError:
 #         config.set_and_save_config("img_embed_module_install", False)
 
@@ -33,15 +33,40 @@ logger = get_logger(__name__)
 
 MODEL_NAME = "unum-cloud/uform3-image-text-multilingual-base"
 
+# 添加模型缓存变量
+_model_cache = {}
+
 
 def get_model_and_processor():
-    # model_text, model_image, processor_text, processor_image = get_model_and_processor()
+    """
+    获取模型和处理器，带有缓存机制以提高性能
+    """
+    global _model_cache
+    
+    # 检查是否已经有缓存的模型
+    if _model_cache:
+        logger.debug("Using cached model and processors")
+        return (_model_cache['model_text'], 
+                _model_cache['model_image'], 
+                _model_cache['processor_text'], 
+                _model_cache['processor_image'])
+    
+    logger.info("Loading model and processors for the first time...")
     processors, models = get_model("unum-cloud/uform3-image-text-multilingual-base")
     model_text = models[Modality.TEXT_ENCODER]
     model_image = models[Modality.IMAGE_ENCODER]
     processor_text = processors[Modality.TEXT_ENCODER]
     processor_image = processors[Modality.IMAGE_ENCODER]
-
+    
+    # 缓存模型和处理器
+    _model_cache = {
+        'model_text': model_text,
+        'model_image': model_image,
+        'processor_text': processor_text,
+        'processor_image': processor_image
+    }
+    
+    logger.info("Model and processors loaded and cached successfully")
     return model_text, model_image, processor_text, processor_image
 
 
@@ -49,10 +74,11 @@ def embed_img(model_image, processor_image, img_filepath):
     """
     将图像转为 embedding vector
     """
+    logger.debug(f"Embedding image: {img_filepath}")
     image = Image.open(img_filepath)
     image_data = processor_image(image)
     image_features, image_embedding = model_image.encode(image_data, return_features=True)
-
+    logger.debug("Image embedding processed successfully")
     return image_embedding
 
 
@@ -62,6 +88,7 @@ def embed_text(model_text, processor_text, text_query, detach_numpy=True):
 
     :param detach_numpy 是否预处理张量
     """
+    logger.debug(f"Embedding text query: {text_query}")
     # 对文本进行编码
     text_data = processor_text(text_query)
     text_features, text_embedding = model_text.encode(text_data, return_features=True)
@@ -72,6 +99,7 @@ def embed_text(model_text, processor_text, text_query, detach_numpy=True):
         text_np = text_embedding
         text_np = np.float32(text_np)
         faiss.normalize_L2(text_np)
+        logger.debug("Text embedding processed successfully")
         return text_np
     else:
         return text_embedding
@@ -202,7 +230,9 @@ def embed_vid_file(
 
     param: vid_file_name, 视频文件名，看起来像"2023-10-01_12-04-28-OCRED.mp4"
     """
-    vid_filepath = os.path.join(video_saved_dir, file_utils.convert_vid_filename_as_YYYY_MM(vid_file_name), vid_file_name)
+    # 构建正确的视频文件路径
+    video_subdir = file_utils.convert_vid_filename_as_YYYY_MM(vid_file_name)
+    vid_filepath = os.path.join(video_saved_dir, video_subdir, vid_file_name)
 
     # 获取视频名在 sqlite db 中的对应 iframe cnt index
     img_db_recorded_dict = {}
@@ -216,21 +246,96 @@ def embed_vid_file(
     if "-SCREENSHOTS" in vid_file_name:
         for k, v in img_db_recorded_dict.items():
             img_db_recorded_dict[k] = os.path.join(v.split("\\")[0], v.split("\\")[1] + "-VIDEO", v.split("\\")[2])
+        all_screenshot_paths_exist = True
         for img_filepath in list(img_db_recorded_dict.values()):
             if not os.path.exists(img_filepath):
                 logger.info(f"Screenshot cache integrity check failed: {img_filepath} not existed.")
-                return False
+                all_screenshot_paths_exist = False
+                break
 
-        embed_img_in_iframe_by_rowid_dict(
-            model_image=model_image,
-            processor_image=processor_image,
-            img_dict=img_db_recorded_dict,
-            img_dir_filepath="",
-            vdb=vdb,
-            enable_find_closest_img_strategy=False,
-        )
+        if all_screenshot_paths_exist:
+            # 所有截图路径都存在，使用原有的逻辑
+            embed_img_in_iframe_by_rowid_dict(
+                model_image=model_image,
+                processor_image=processor_image,
+                img_dict=img_db_recorded_dict,
+                img_dir_filepath="",
+                vdb=vdb,
+                enable_find_closest_img_strategy=False,
+            )
+        else:
+            # 截图路径不存在，回退到从视频中提取帧的逻辑
+            logger.info(f"Screenshot cache not found for {vid_file_name}, falling back to extracting frames from video.")
+            
+            # 使用与普通视频相同的处理逻辑
+            iframe_sub_path = os.path.join(iframe_path, os.path.splitext(vid_file_name)[0][:19])  # 取文件名的日期部分
+            iframe_img_list = []
+            if os.path.exists(iframe_sub_path):
+                iframe_img_list = os.listdir(iframe_sub_path)
+
+            if not all(
+                element in iframe_img_list for element in list(img_db_recorded_dict.values())
+            ):  # 检查缓存图像文件是否已存在，否则重新提取
+                # 清理缓存
+                try:
+                    shutil.rmtree(iframe_sub_path)
+                except FileNotFoundError:
+                    pass
+                file_utils.ensure_dir(iframe_sub_path)
+                extract_iframe(video_file=vid_filepath, iframe_path=iframe_sub_path)
+                crop_iframe(iframe_sub_path)  # 提取后需要对图像进行裁剪处理
+
+            # 进行图像嵌入
+            embed_img_in_iframe_by_rowid_dict(
+                model_image=model_image,
+                processor_image=processor_image,
+                img_dict=img_db_recorded_dict,
+                img_dir_filepath=iframe_sub_path,
+                vdb=vdb,
+            )
+            # 清理图像缓存
+            try:
+                shutil.rmtree(iframe_sub_path)
+            except FileNotFoundError:
+                pass
+
+        # 处理截图缓存目录
         screenshot_cache_dir_path = file_utils.get_screenshots_cache_dir_by_video_file_name(vid_file_name)
-        os.rename(screenshot_cache_dir_path, screenshot_cache_dir_path + "-IMGEMB")
+        
+        # 重命名截图缓存目录添加-IMGEMB后缀
+        if screenshot_cache_dir_path and os.path.exists(screenshot_cache_dir_path):
+            # 检查目录是否已经包含-IMGEMB后缀
+            if "-IMGEMB" not in screenshot_cache_dir_path:
+                try:
+                    # 检查目录是否已经被重命名为包含-VIDEO后缀
+                    if "-VIDEO" in screenshot_cache_dir_path:
+                        # 如果已经是-VIDEO后缀，替换为-VIDEO-IMGEMB
+                        new_dir_path = screenshot_cache_dir_path.replace("-VIDEO", "-VIDEO-IMGEMB")
+                    else:
+                        # 否则直接添加-IMGEMB后缀
+                        new_dir_path = screenshot_cache_dir_path + "-IMGEMB"
+                    
+                    os.rename(screenshot_cache_dir_path, new_dir_path)
+                    logger.info(f"Renamed screenshot cache directory from: {screenshot_cache_dir_path} to: {new_dir_path}")
+                except Exception as e:
+                    logger.error(f"Failed to rename screenshot cache directory {screenshot_cache_dir_path}: {e}")
+            else:
+                logger.info(f"Screenshot cache directory already renamed: {screenshot_cache_dir_path}")
+        else:
+            # 尝试通过其他方式查找截图缓存目录
+            base_video_name = vid_file_name[:19]
+            cache_dirs = file_utils.get_screenshots_cache_dir_lst()
+            matching_dirs = [d for d in cache_dirs if base_video_name in d and "-VIDEO" in d and "-IMGEMB" not in d]
+            if matching_dirs:
+                dir_to_rename = matching_dirs[0]
+                try:
+                    new_dir_path = dir_to_rename + "-IMGEMB"
+                    os.rename(dir_to_rename, new_dir_path)
+                    logger.info(f"Renamed screenshot cache directory from: {dir_to_rename} to: {new_dir_path}")
+                except Exception as e:
+                    logger.error(f"Failed to rename screenshot cache directory {dir_to_rename}: {e}")
+            else:
+                logger.warning(f"Screenshot cache directory not found or doesn't exist for video: {vid_file_name}")
 
     else:
         # 判断是否存在图片缓存文件，若无则提取
@@ -265,7 +370,14 @@ def embed_vid_file(
         except FileNotFoundError:
             pass
 
-    os.rename(vid_filepath, vid_filepath.replace("-OCRED", "-IMGEMB-OCRED"))
+    # 为视频添加 -IMGEMB 标签
+    vid_filepath_new = vid_filepath.replace("-OCRED", "-OCRED-IMGEMB")
+    try:
+        os.rename(vid_filepath, vid_filepath_new)
+        logger.info(f"Renamed video file from: {vid_filepath} to: {vid_filepath_new}")
+    except Exception as e:
+        logger.error(f"Failed to rename video file {vid_filepath}: {e}")
+
     return True
 
 
@@ -288,14 +400,20 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
                 continue
             if "-IMGEMB" in video_name or "-COMPRESS" in video_name:
                 continue
-            vdb = VectorDatabase(vdb_filename=get_vdb_filename_via_video_filename(video_name))
-            print(f"embedding {video_name}")
-            embed_vid_file(model_image=model_image, processor_image=processor_image, vdb=vdb, vid_file_name=video_name)
-            video_process_count += 1
-            if video_process_count > video_queue_batch:
+            try:
+                vdb = VectorDatabase(vdb_filename=get_vdb_filename_via_video_filename(video_name))
+                print(f"embedding {video_name}")
+                embed_vid_file(model_image=model_image, processor_image=processor_image, vdb=vdb, vid_file_name=video_name)
+                video_process_count += 1
+            except Exception as e:
+                logger.error(f"处理视频 {video_name} 时出错: {e}")
+                continue
+            if video_process_count >= video_queue_batch:
                 break
-        if video_process_count > video_queue_batch:
+        if video_process_count >= video_queue_batch:
             break
+    
+    return video_process_count
 
 
 def get_vdbs_filename_via_time_range(start_datetime: datetime.datetime, end_datetime: datetime.datetime):
