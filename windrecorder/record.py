@@ -1025,16 +1025,20 @@ def try_empty_cache_dir_in_idle_routine():
 # - ffmpeg_cmd: FFmpeg录制命令参数列表，使用占位符在实际使用时替换
 # - available: 是否可用（通过编码器支持测试后更新）
 CONFIG_RECORD_PRESET = {
-    # CPU编码器
+    # CPU编码器 - 最大关键帧间隔为10帧
     "cpu_h264": {
         "preset": "cpu_h264",
         "ffmpeg_cmd": [
             "-c:v",
             "libx264",
-            "-r",
+            "-crf",
             "CRF_NUM",
+            "-r",
+            "FRAMERATE",
             "-preset",
             "ultrafast",
+            "-g",
+            "10",
             "-pix_fmt",
             "yuv420p",
         ],
@@ -1045,16 +1049,20 @@ CONFIG_RECORD_PRESET = {
         "ffmpeg_cmd": [
             "-c:v",
             "libx265",
-            "-r",
+            "-crf",
             "CRF_NUM",
+            "-r",
+            "FRAMERATE",
             "-preset",
             "ultrafast",
+            "-g",
+            "10",
             "-pix_fmt",
             "yuv420p",
         ],
         "available": True,
     },
-    # Intel核显编码器
+    # Intel核显编码器 - 最大关键帧间隔为10帧
     "qsv265": {
         "preset": "qsv265",
         "ffmpeg_cmd": [
@@ -1066,36 +1074,46 @@ CONFIG_RECORD_PRESET = {
             "FRAMERATE",
             "-preset",
             "veryslow",
+            "-g",
+            "10",
             "-pix_fmt",
             "nv12",
         ],
         "available": True,
     },
-    # NVIDIA显卡编码器
+    # NVIDIA显卡编码器 - 最大关键帧间隔为10帧
     "NVIDIA_h265": {
         "preset": "NVIDIA_h265",
         "ffmpeg_cmd": [
             "-c:v",
             "hevc_nvenc",
-            "-r",
+            "-cq",
             "CRF_NUM",
+            "-r",
+            "FRAMERATE",
             "-preset",
             "p1",
+            "-g",
+            "10",
             "-pix_fmt",
             "yuv420p",
         ],
         "available": True,
     },
-    # AV1编码器
+    # AV1编码器 - 最大关键帧间隔为10帧
     "SVT-AV1": {
         "preset": "SVT-AV1",
         "ffmpeg_cmd": [
             "-c:v",
             "libsvtav1",
-            "-r",
+            "-crf",
             "CRF_NUM",
+            "-r",
+            "FRAMERATE",
             "-preset",
             "8",
+            "-g",
+            "10",
             "-pix_fmt",
             "yuv420p",
         ],

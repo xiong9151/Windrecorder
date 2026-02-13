@@ -423,10 +423,10 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
         for video_name in tqdm(videos_names):
             logger.debug(f"img_embed({video_process_count}/{video_queue_batch}): embedding {video_dir}, {video_name}")
             # 确认视频已被 OCR 索引，且没含有 -IMGEMB 标签
-            # 如果视频被压缩了，目前跳过；TODO 未来如果使用时间戳手段提取、或者可以接受iframe提取的时域误差，则不需要这条规则了
+            # 移除了对 -COMPRESS 视频的跳过限制，现在可以处理压缩视频
             if "-OCRED" not in video_name:
                 continue
-            if "-IMGEMB" in video_name or "-COMPRESS" in video_name or "-NODATA" in video_name:
+            if "-IMGEMB" in video_name or "-NODATA" in video_name:
                 continue
             try:
                 vdb = VectorDatabase(vdb_filename=get_vdb_filename_via_video_filename(video_name))
