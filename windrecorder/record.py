@@ -134,6 +134,14 @@ def record_screen_via_ffmpeg(
         )
 
     captureblt_args = ["-draw_mouse", "0", "-show_region", "0"]
+    
+    # 解析目标分辨率配置
+    target_resolution = config.target_screen_res  # 格式如 "scale=1920:1080"
+    if target_resolution and target_resolution.startswith("scale="):
+        video_filter_args = ["-vf", target_resolution]
+    else:
+        video_filter_args = []
+    
     ffmpeg_cmd = [
         config.ffmpeg_path,
         "-hwaccel",
@@ -146,6 +154,7 @@ def record_screen_via_ffmpeg(
         *captureblt_args,
         "-i",
         "desktop",
+        *video_filter_args,
         *record_encoder_args,
         *pix_fmt_args,
         "-t",
@@ -1025,7 +1034,7 @@ def try_empty_cache_dir_in_idle_routine():
 # - ffmpeg_cmd: FFmpeg录制命令参数列表，使用占位符在实际使用时替换
 # - available: 是否可用（通过编码器支持测试后更新）
 CONFIG_RECORD_PRESET = {
-    # CPU编码器 - 最大关键帧间隔为4帧
+    # CPU编码器 - 关键帧间隔为30帧（15秒@2fps）
     "cpu_h264": {
         "preset": "cpu_h264",
         "ffmpeg_cmd": [
@@ -1038,7 +1047,7 @@ CONFIG_RECORD_PRESET = {
             "-preset",
             "ultrafast",
             "-g",
-            "4",
+            "30",
             "-pix_fmt",
             "yuv420p",
         ],
@@ -1056,13 +1065,13 @@ CONFIG_RECORD_PRESET = {
             "-preset",
             "ultrafast",
             "-g",
-            "4",
+            "30",
             "-pix_fmt",
             "yuv420p",
         ],
         "available": True,
     },
-    # Intel核显编码器 - 最大关键帧间隔为4帧
+    # Intel核显编码器 - 关键帧间隔为30帧（15秒@2fps）
     "qsv265": {
         "preset": "qsv265",
         "ffmpeg_cmd": [
@@ -1075,13 +1084,13 @@ CONFIG_RECORD_PRESET = {
             "-preset",
             "veryslow",
             "-g",
-            "4",
+            "30",
             "-pix_fmt",
             "nv12",
         ],
         "available": True,
     },
-    # NVIDIA显卡编码器 - 最大关键帧间隔为4帧
+    # NVIDIA显卡编码器 - 关键帧间隔为30帧（15秒@2fps）
     "NVIDIA_h265": {
         "preset": "NVIDIA_h265",
         "ffmpeg_cmd": [
@@ -1094,13 +1103,13 @@ CONFIG_RECORD_PRESET = {
             "-preset",
             "p1",
             "-g",
-            "4",
+            "30",
             "-pix_fmt",
             "yuv420p",
         ],
         "available": True,
     },
-    # AV1编码器 - 最大关键帧间隔为4帧
+    # AV1编码器 - 关键帧间隔为30帧（15秒@2fps）
     "SVT-AV1": {
         "preset": "SVT-AV1",
         "ffmpeg_cmd": [
@@ -1113,7 +1122,7 @@ CONFIG_RECORD_PRESET = {
             "-preset",
             "8",
             "-g",
-            "4",
+            "30",
             "-pix_fmt",
             "yuv420p",
         ],
