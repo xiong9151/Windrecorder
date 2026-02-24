@@ -36,7 +36,7 @@ else:
 subprocess.run("title Embedding Img for existing video files", shell=True)
 
 videos_filepath = file_utils.get_file_path_list(config.record_videos_dir_ud)
-videos_filepath_filter = [item for item in videos_filepath if "-IMGEMB" not in item and "-OCRD" in item and "NODATA" not in item]
+videos_filepath_filter = [item for item in videos_filepath if "-IMGEMB" not in item and "NODATA" not in item]
 videos_filepath_filter_num = len(videos_filepath_filter)
 
 
