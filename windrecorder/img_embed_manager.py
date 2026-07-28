@@ -11,12 +11,22 @@
 #     except ModuleNotFoundError:
 #         config.set_and_save_config("img_embed_module_install", False)
 
+# GPU 加速说明:
+# - 模型推理 (UForm): 自动检测 CUDA，有则用 PyTorch GPU 后端，无则回退到 ONNX CPU
+# - 向量搜索 (Faiss): 自动检测 faiss GPU 支持，有则使用 StandardGpuResources (GpuIndexFlatL2)
+# - 帧提取 (ffmpeg): 自动检测 ffmpeg CUDA 硬件解码，有则用 GPU 解码取帧
+# - UForm GPU + Faiss GPU + ffmpeg CUDA 全管线 GPU 加速
+# - 已有 .index 文件完全兼容，无需重新嵌入
+# - 如需 GPU 加速，请手动安装 torch 和 faiss-gpu:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install faiss-gpu
+
 import datetime
 import math
 import os
 import shutil
+import time
 
-import faiss
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -27,7 +37,7 @@ from windrecorder import file_utils, utils
 from windrecorder.config import config
 from windrecorder.db_manager import db_manager
 from windrecorder.logger import get_logger
-from windrecorder.ocr_manager import crop_iframe, extract_iframe
+from windrecorder.ocr_manager import crop_iframe, extract_iframe, is_file_in_use
 
 logger = get_logger(__name__)
 
@@ -37,47 +47,135 @@ MODEL_NAME = "unum-cloud/uform3-image-text-multilingual-base"
 _model_cache = {}
 
 
+def _to_numpy(tensor_or_array):
+    """将 torch Tensor 或 numpy array 统一转为 numpy array，兼容 GPU 张量"""
+    if hasattr(tensor_or_array, "cpu"):
+        return tensor_or_array.cpu().numpy()
+    return tensor_or_array
+
+
+def _is_cuda_available():
+    """检查 CUDA + PyTorch 是否可用"""
+    try:
+        import torch
+
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def _is_faiss_gpu_available():
+    """检查 faiss GPU 支持是否可用"""
+    try:
+        import faiss
+
+        return hasattr(faiss, "StandardGpuResources")
+    except ImportError:
+        return False
+
+
+def _create_gpu_faiss_index(dimension):
+    """创建 GPU Faiss 索引"""
+    import faiss
+
+    res = faiss.StandardGpuResources()
+    cpu_index = faiss.IndexFlatL2(dimension)
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+    return gpu_index
+
+
+# 懒加载 faiss（GPU 版可能与 CPU 版冲突，按需导入）
+_faiss = None
+_gpu_res = None
+
+
+def _get_faiss():
+    global _faiss
+    if _faiss is None:
+        import faiss as _faiss
+    return _faiss
+
+
+def _get_gpu_resources():
+    """获取全局 Faiss GPU 资源（单例）"""
+    global _gpu_res
+    if _gpu_res is None and _is_faiss_gpu_available():
+        import faiss
+        _gpu_res = faiss.StandardGpuResources()
+    return _gpu_res
+
+
+def _index_to_gpu(index):
+    """将 CPU Faiss 索引转为 GPU 索引（如果可用）"""
+    res = _get_gpu_resources()
+    if res is not None:
+        import faiss
+        return faiss.index_cpu_to_gpu(res, 0, index)
+    return index
+
+
+def _index_to_cpu(index):
+    """将 GPU Faiss 索引转回 CPU 索引（写文件前必须）"""
+    import faiss
+    try:
+        return faiss.index_gpu_to_cpu(index)
+    except (RuntimeError, TypeError, AttributeError):
+        return index
+
+
 def get_model_and_processor():
     """
-    获取模型和处理器，带有缓存机制以提高性能
+    获取模型和处理器，带有缓存机制以提高性能。
+
+    自动检测 CUDA → PyTorch GPU 后端，兼容已有 ONNX CPU 嵌入向量。
     """
     global _model_cache
-    
+
     # 检查是否已经有缓存的模型
     if _model_cache:
         logger.debug("Using cached model and processors")
-        return (_model_cache['model_text'], 
-                _model_cache['model_image'], 
-                _model_cache['processor_text'], 
-                _model_cache['processor_image'])
-    
-    logger.info("Loading model and processors for the first time...")
-    processors, models = get_model("unum-cloud/uform3-image-text-multilingual-base")
+        return (
+            _model_cache["model_text"],
+            _model_cache["model_image"],
+            _model_cache["processor_text"],
+            _model_cache["processor_image"],
+        )
+
+    # 尝试 GPU 加速 (PyTorch CUDA 后端)
+    if _is_cuda_available():
+        logger.info("CUDA detected, using PyTorch GPU backend for UForm model.")
+        processors, models = get_model(MODEL_NAME, backend="torch", device="cuda")
+    else:
+        logger.info("CUDA not available, using ONNX CPU backend for UForm model.")
+        processors, models = get_model(MODEL_NAME)
+
     model_text = models[Modality.TEXT_ENCODER]
     model_image = models[Modality.IMAGE_ENCODER]
     processor_text = processors[Modality.TEXT_ENCODER]
     processor_image = processors[Modality.IMAGE_ENCODER]
-    
+
     # 缓存模型和处理器
     _model_cache = {
-        'model_text': model_text,
-        'model_image': model_image,
-        'processor_text': processor_text,
-        'processor_image': processor_image
+        "model_text": model_text,
+        "model_image": model_image,
+        "processor_text": processor_text,
+        "processor_image": processor_image,
     }
-    
+
     logger.info("Model and processors loaded and cached successfully")
     return model_text, model_image, processor_text, processor_image
 
 
 def embed_img(model_image, processor_image, img_filepath):
     """
-    将图像转为 embedding vector
+    将图像转为 embedding vector，始终返回 numpy array
     """
     logger.debug(f"Embedding image: {img_filepath}")
     image = Image.open(img_filepath)
     image_data = processor_image(image)
     image_features, image_embedding = model_image.encode(image_data, return_features=True)
+    # 统一转为 numpy (torch Tensor → numpy array)
+    image_embedding = _to_numpy(image_embedding)
     logger.debug("Image embedding processed successfully")
     return image_embedding
 
@@ -95,9 +193,10 @@ def embed_text(model_text, processor_text, text_query, detach_numpy=True):
 
     # 预处理张量
     if detach_numpy:
-        # text_np = text_embedding.detach().cpu().numpy()
-        text_np = text_embedding
-        text_np = np.float32(text_np)
+        # 统一转为 numpy (torch Tensor → numpy array)
+        text_embedding = _to_numpy(text_embedding)
+        faiss = _get_faiss()
+        text_np = np.float32(text_embedding)
         faiss.normalize_L2(text_np)
         logger.debug("Text embedding processed successfully")
         return text_np
@@ -121,20 +220,33 @@ class VectorDatabase:
 
     def __init__(self, vdb_filename, db_dir=config.vdb_img_path_ud, dimension=256):  # uform 使用 256d 向量
         """
-        初始化新建/载入数据库
+        初始化新建/载入数据库，自动使用 GPU 加速 Faiss 索引（如果可用）
 
         :param vdb_filename, 向量数据库名字
         :param db_dir, 向量数据库路径
         """
+        faiss = _get_faiss()
         self.dimension = dimension
         self.vdb_filepath = os.path.join(db_dir, vdb_filename)
         self.all_ids_list = []
+        self._gpu_enabled = _is_faiss_gpu_available()
         file_utils.ensure_dir(db_dir)
         if os.path.exists(self.vdb_filepath):
             self.index = faiss.read_index(self.vdb_filepath)
             self.all_ids_list = faiss.vector_to_array(self.index.id_map).tolist()  # 获得向量数据库中已有 ROWID 列表，以供写入时比对
+            # 读入后在 GPU 上操作（加速 add/search）
+            if self._gpu_enabled:
+                gpu_index = _index_to_gpu(self.index)
+                if gpu_index is not self.index:
+                    logger.info("Faiss index moved to GPU.")
+                    self.index = gpu_index
         else:
-            self.index = faiss.IndexIDMap(faiss.IndexFlatL2(self.dimension))
+            cpu_index = faiss.IndexIDMap(faiss.IndexFlatL2(self.dimension))
+            if self._gpu_enabled:
+                self.index = _index_to_gpu(cpu_index)
+                logger.info("New Faiss index created on GPU.")
+            else:
+                self.index = cpu_index
 
     def add_vector(self, vector, rowid: int):
         """
@@ -143,6 +255,7 @@ class VectorDatabase:
         :param vector: 图像 embedding 后的向量
         :param rowid: sqlite 对应的 ROWID
         """
+        faiss = _get_faiss()
         # vector = vector.detach().cpu().numpy()  # 转换为numpy数组
         vector = np.float32(vector)  # 转换为float32类型的numpy数组
         faiss.normalize_L2(vector)  # 规范化向量，避免在搜索时出现错误的结果
@@ -157,9 +270,11 @@ class VectorDatabase:
         return [(i, probs[0][j]) for j, i in enumerate(indices[0])]
 
     def save_to_file(self):
-        """将向量数据库写入本地文件"""
-        faiss.write_index(self.index, self.vdb_filepath)
-        self.all_ids_list = faiss.vector_to_array(self.index.id_map).tolist()  # 更新 ROWID 列表
+        """将向量数据库写入本地文件（自动将 GPU 索引转回 CPU 后写入）"""
+        faiss = _get_faiss()
+        index_to_save = _index_to_cpu(self.index)
+        faiss.write_index(index_to_save, self.vdb_filepath)
+        self.all_ids_list = faiss.vector_to_array(index_to_save.id_map).tolist()  # 更新 ROWID 列表
 
 
 def find_closest_iframe_img_dict_item(target: str, img_dict: dict, threshold=3):
@@ -233,6 +348,12 @@ def embed_vid_file(
     # 构建正确的视频文件路径
     video_subdir = file_utils.convert_vid_filename_as_YYYY_MM(vid_file_name)
     vid_filepath = os.path.join(video_saved_dir, video_subdir, vid_file_name)
+
+    # 如果视频文件正在被使用（如正在录制中），跳过它
+    if is_file_in_use(vid_filepath):
+        logger.info(f"{vid_file_name}: video file is in use (possibly being recorded), skipped.")
+        print(f"  ⏭ {vid_file_name}: 文件正在使用中（可能正在录制），跳过")
+        return "skip"
 
     # 获取视频名在 sqlite db 中的对应 iframe cnt index
     img_db_recorded_dict = {}
@@ -414,6 +535,7 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
     流程：处理未嵌入的视频，提取嵌入视频 iframe embedding 到向量数据库。默认计算时间控制在 30 分钟左右内（即索引 12~15 个视频）
     """
     video_process_count = 0
+    start_time = time.time()
 
     model_text, model_image, processor_text, processor_image = get_model_and_processor()
 
@@ -432,8 +554,11 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
                 vdb = VectorDatabase(vdb_filename=get_vdb_filename_via_video_filename(video_name))
                 print(f"embedding {video_name}")
                 success = embed_vid_file(model_image=model_image, processor_image=processor_image, vdb=vdb, vid_file_name=video_name)
-                if success:
+                if success is True:
                     video_process_count += 1
+                elif success == "skip":
+                    # 文件正在使用中，不计入处理数量，也不报错
+                    pass
                 else:
                     # 检查是否是因为没有OCR记录导致的失败
                     # 如果是普通视频（非SCREENSHOTS）且没有OCR记录，自动清理OCR标签
@@ -474,7 +599,19 @@ def all_videofile_do_img_embedding_routine(video_queue_batch=14):
                 break
         if video_process_count >= video_queue_batch:
             break
-    
+
+    elapsed = time.time() - start_time
+    gpu_flags = []
+    if _is_cuda_available():
+        gpu_flags.append("UForm GPU")
+    if _is_faiss_gpu_available():
+        gpu_flags.append("Faiss GPU")
+    summary = f"嵌入完成: {video_process_count} 个视频, 耗时 {elapsed:.1f}s, GPU加速: {', '.join(gpu_flags) if gpu_flags else '无'}"
+    logger.info(summary)
+    print(f"\n[OK] 嵌入完成: {video_process_count} 个视频, 耗时 {elapsed:.1f}s")
+    if gpu_flags:
+        print(f"   GPU 加速: {' + '.join(gpu_flags)}")
+
     return video_process_count
 
 

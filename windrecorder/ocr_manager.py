@@ -104,7 +104,7 @@ def initialize_third_part_ocr_engine(ocr_engine_name=config.ocr_engine):
 
             from wechat_ocr.ocr_manager import OcrManager
 
-            wechat_ocr_dir = "ocr_lib\\wxocr-binary\\WeChatOCR.exe "
+            wechat_ocr_dir = "ocr_lib\\wxocr-binary\\WeChatOCR.exe"
             wechat_dir = "ocr_lib\\wxocr-binary"
             wx_ocr_manager = OcrManager(wechat_dir)
             # 设置WeChatOcr目录
@@ -146,9 +146,52 @@ def is_file_in_use(file_path):
 
 # 提取视频i帧
 # todo - 加入检测视频是否为合法视频?
+_ffmpeg_cuda_checked = False
+_ffmpeg_cuda_ok = False
+
+
+def _ffmpeg_cuda_available():
+    """检查 ffmpeg 是否支持 CUDA 硬件解码（结果缓存）"""
+    global _ffmpeg_cuda_checked, _ffmpeg_cuda_ok
+    if not _ffmpeg_cuda_checked:
+        try:
+            result = subprocess.run(
+                [config.ffmpeg_path, "-hide_banner", "-hwaccels"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _ffmpeg_cuda_ok = "cuda" in result.stdout.lower()
+            _ffmpeg_cuda_checked = True
+        except Exception:
+            _ffmpeg_cuda_ok = False
+            _ffmpeg_cuda_checked = True
+    return _ffmpeg_cuda_ok
+
+
+def get_video_codec(video_file):
+    """通过 ffprobe 检测视频文件的编码格式"""
+    try:
+        cmd = f"{config.ffprobe_path} -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 \"{video_file}\""
+        result = subprocess.check_output(cmd, shell=True).decode().strip().lower()
+        return result
+    except Exception as e:
+        logger.warning(f"无法检测视频编码 {video_file}: {e}，默认按非AV1处理")
+        return "unknown"
+
+
 def extract_iframe(video_file, iframe_path, iframe_interval=4000):
     logger.info(f"extracting video i-frame: {video_file}")
-    if "av1" not in config.record_encoder.lower():
+    # 通过实际检测视频编码来判断提取方式，而非依赖录制配置
+
+    # 检查 ffmpeg CUDA 硬件解码是否可用，有则用 GPU 加速
+    if _ffmpeg_cuda_available():
+        logger.info("ffmpeg CUDA hardware acceleration available, using GPU decode.")
+        extract_iframe_by_ffmpeg(video_file, iframe_path, use_cuda=True)
+        return
+
+    codec = get_video_codec(video_file)
+    if codec in ["av1", "av01"]:
+        extract_iframe_by_ffmpeg(video_file, iframe_path)
+    else:
         cap = cv2.VideoCapture(video_file)
         fps = cap.get(cv2.CAP_PROP_FPS)
 
@@ -166,23 +209,38 @@ def extract_iframe(video_file, iframe_path, iframe_interval=4000):
             frame_cnt += 1
 
         cap.release()
+
+
+def extract_iframe_by_ffmpeg(video_file, iframe_path, use_cuda=False):
+    if use_cuda:
+        # GPU 加速：先用 CUDA 硬件解码，再将帧转回 CPU 内存
+        ffmpeg_cmd = [
+            config.ffmpeg_path,
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
+            "-i",
+            video_file,
+            "-vf",
+            "select='eq(pict_type\\,I)',hwdownload,format=nv12",
+            "-r",
+            "1",
+            "-f",
+            "image2",
+            os.path.join(iframe_path, "%d.jpg"),
+        ]
     else:
-        extract_iframe_by_ffmpeg(video_file, iframe_path)
-
-
-def extract_iframe_by_ffmpeg(video_file, iframe_path):
-    ffmpeg_cmd = [
-        config.ffmpeg_path,
-        "-i",
-        video_file,
-        "-vf",
-        "select='eq(pict_type\\,I)'",
-        "-r",
-        "1",
-        "-f",
-        "image2",
-        os.path.join(iframe_path, "%d.jpg"),
-    ]
+        ffmpeg_cmd = [
+            config.ffmpeg_path,
+            "-i",
+            video_file,
+            "-vf",
+            "select='eq(pict_type\\,I)'",
+            "-r",
+            "1",
+            "-f",
+            "image2",
+            os.path.join(iframe_path, "%d.jpg"),
+        ]
     subprocess.run(" ".join(ffmpeg_cmd), shell=True, check=True)
     logger.debug("extract frame cut:" + " ".join(ffmpeg_cmd))
 

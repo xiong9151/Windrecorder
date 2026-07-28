@@ -28,6 +28,8 @@ userdata
 DEBUGMODE.txt
 DEBUGMODE1.txt
 cache_screenshot
+data
+newlog.txt
 @AutomationLog.txt
 webui.bat
 test.bat

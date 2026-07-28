@@ -68,44 +68,8 @@ def record_screen_via_ffmpeg(
                 lst[i] = f"{config.record_crf}"
             elif lst[i] == "FRAMERATE":
                 lst[i] = f"{framerate}"
-            elif lst[i] == "VIDEOSIZE":
-                if record_range_args:
-                    # 从record_range_args中提取视频尺寸
-                    for j in range(len(record_range_args)):
-                        if record_range_args[j] == "-video_size" and j + 1 < len(record_range_args):
-                            lst[i] = record_range_args[j + 1]
-                            break
-                else:
-                    # 如果没有指定录制范围，则使用整个桌面的尺寸
-                    desktop_size = utils.get_display_info()[0]  # 获取主显示器信息
-                    lst[i] = f"{desktop_size['width']}x{desktop_size['height']}"
-            elif lst[i] == "OFFSETX":
-                if record_range_args:
-                    # 从record_range_args中提取偏移X坐标
-                    for j in range(len(record_range_args)):
-                        if record_range_args[j] == "-offset_x" and j + 1 < len(record_range_args):
-                            lst[i] = record_range_args[j + 1]
-                            break
-                else:
-                    lst[i] = "0"
-            elif lst[i] == "OFFSETY":
-                if record_range_args:
-                    # 从record_range_args中提取偏移Y坐标
-                    for j in range(len(record_range_args)):
-                        if record_range_args[j] == "-offset_y" and j + 1 < len(record_range_args):
-                            lst[i] = record_range_args[j + 1]
-                            break
-                else:
-                    lst[i] = "0"
-            elif lst[i] == "PRESET_VAL":
-                # 使用默认的veryfast预设，如果需要可以扩展为配置项
-                lst[i] = "veryslow"
-            elif lst[i] == "PLUGIN_VAL":
-                # 使用默认的hevc_hw插件，如果需要可以扩展为配置项
-                lst[i] = "hevc_hw"
-            elif lst[i] == "PIX_FMT_VAL":
-                # 使用默认的nv12格式，如果需要可以扩展为配置项
-                lst[i] = "nv12"
+            elif lst[i] == "BITRATE":
+                lst[i] = f"{bitrate_displays_factor}k"
         return lst
 
     display_info = utils.get_display_info()
@@ -113,9 +77,6 @@ def record_screen_via_ffmpeg(
 
     record_range_args = []
     if config.multi_display_record_strategy == "single" and len(display_info) > 1:  # 当有多台显示器、且选择仅录制其中一台时
-        record_encoder_args = _replace_value_in_args(
-            CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], config.record_bitrate
-        )
         if config.record_single_display_index > len(display_info):
             logger.warning("display index not detected, reset record_single_display_index to default index 1")
             config.set_and_save_config("record_single_display_index", 1)
@@ -128,6 +89,9 @@ def record_screen_via_ffmpeg(
                 "-offset_y",
                 f"{display_info[config.record_single_display_index]['top']}",
             ]
+        record_encoder_args = _replace_value_in_args(
+            CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], config.record_bitrate
+        )
     else:
         record_encoder_args = _replace_value_in_args(
             CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], int(config.record_bitrate) * (len(display_info) - 1)
@@ -302,10 +266,10 @@ def compress_video_resolution(video_path, scale_factor, custom_output_name=None)
         if os.stat(output_path).st_size < 1024:
             logger.warning("Parameter not supported, fallback to default setting.")
             file_utils.delete_files_via_config(output_path)  # 清理空文件
-            output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=2)
+            output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=cpu_threads)
     else:
         logger.warning("Parameter not supported, fallback to default setting.")
-        output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=2)
+        output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=cpu_threads)
 
     return output_path
 

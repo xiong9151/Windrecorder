@@ -24,4 +24,6 @@ start mshta vbscript:createobject("wscript.shell").run("%~nx0"^&" h",0)^&(window
 cd /d %~dp0
 call conda activate py311
 
+set SSL_CERT_FILE=%CONDA_PREFIX%\Lib\site-packages\certifi\cacert.pem
+
 python "%~dp0\main.py"

@@ -11,6 +11,28 @@ import webbrowser
 from os import getpid
 from subprocess import Popen
 
+# 修复 Windows 证书存储损坏导致的 SSL 错误
+# Python ssl.create_default_context() 加载 Windows 系统证书时遇到损坏证书会 crash
+# 导致 tornado/streamlit 启动失败。这里直接绕过 Windows 证书存储，用 certifi 自带的证书包。
+import certifi
+import ssl
+
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
+# 补丁：拦截 _load_windows_store_certs，避免加载损坏的系统证书
+_orig_load_windows_store_certs = ssl.SSLContext._load_windows_store_certs
+
+
+def _patched_load_windows_store_certs(self, storename, purpose):
+    try:
+        _orig_load_windows_store_certs(self, storename, purpose)
+    except ssl.SSLError:
+        # Windows 证书存储中有损坏证书，退回到 certifi
+        self.load_verify_locations(cafile=certifi.where())
+
+
+ssl.SSLContext._load_windows_store_certs = _patched_load_windows_store_certs
+
 import pygetwindow
 import pystray
 import requests
