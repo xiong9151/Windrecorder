@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import product
 from subprocess import CalledProcessError
 
@@ -288,83 +289,86 @@ class _DBManager:
         # 遍历查询所有数据库信息
         df_all = pd.DataFrame()
         row_count = 0
-        for key in query_db_name_list:
-            db_filepath_origin = os.path.join(self.db_path, key)  # 构建完整路径
-            db_filepath = self.get_temp_dbfilepath(db_filepath_origin)  # 检查/创建临时查询用的数据库
+
+        def _query_single_db(key):
+            """在单个数据库中执行查询，返回结果 DataFrame"""
+            db_filepath = os.path.join(self.db_path, key)
             logger.info(f"Querying {db_filepath}")
 
-            conn = sqlite3.connect(db_filepath)  # 连接数据库
+            conn = sqlite3.connect(db_filepath)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA synchronous=OFF")
+            conn.execute("PRAGMA cache_size=-8000")  # 8MB 缓存
 
-            # 构建sql
-            keywords = keyword_input.split()  # 用空格分割所有的关键词，存为list
-            query = "SELECT * FROM video_text WHERE "
+            try:
+                if not keyword_input.isspace() and keyword_input:
+                    keywords = keyword_input.split()
 
-            if not keyword_input.isspace() and keyword_input:  # 关键词不为空时
-                # 每个关键词执行相近字形匹配（配置项开）
-                if config.use_similar_ch_char_to_search:
-                    # 查询每个关键词的相近字形结果，获得总共需要搜索的条目
-                    similar_strings_list = []
-                    for keyword in keywords:
-                        similar_strings = self.generate_similar_ch_strings(keyword)
-                        similar_strings_list.append(similar_strings)
+                    if config.use_similar_ch_char_to_search:
+                        # 相近字形搜索只能走 LIKE
+                        similar_strings_list = []
+                        for keyword in keywords:
+                            similar_strings = self.generate_similar_ch_strings(keyword)
+                            similar_strings_list.append(similar_strings)
 
-                    # 构建所有关键词的sql
-                    conditions = []
-                    for keywords in similar_strings_list:
-                        group_condition = " OR ".join(
-                            f"(ocr_text LIKE '%{keyword}%') OR (win_title LIKE '%{keyword}%')" for keyword in keywords
-                        )
-                        conditions.append(f"({group_condition})")
+                        conditions = []
+                        for keyword_group in similar_strings_list:
+                            group_condition = " OR ".join(
+                                f"(ocr_text LIKE '%{kw}%' OR win_title LIKE '%{kw}%')" for kw in keyword_group
+                            )
+                            conditions.append(f"({group_condition})")
+                        query = "SELECT * FROM video_text WHERE " + " AND ".join(conditions)
+                        params = ()
 
-                    query = query + " AND ".join(conditions)
-                    # 输出参考：(ocr_text LIKE '%a1%' AND ocr_text LIKE '%a2%' AND ocr_text LIKE '%a3%') OR (ocr_text LIKE '%b1%' AND ocr_text LIKE '%b2%') OR (ocr_text LIKE '%c%');
+                    else:
+                        # 普通 LIKE 搜索
+                        conditions = []
+                        for keyword in keywords:
+                            keyword = re.sub(r"(?<=\w)-(?=\w)", " ", keyword)
+                            conditions.append(f"(ocr_text LIKE '%{keyword}%' OR win_title LIKE '%{keyword}%')")
+                        query = "SELECT * FROM video_text WHERE " + " AND ".join(conditions)
+                        params = ()
+
+                        # 排除关键词
+                        if keyword_input_exclude and not keyword_input_exclude.isspace():
+                            keywords_exclude = keyword_input_exclude.split()
+                            for kw_exclude in keywords_exclude:
+                                kw_exclude = re.sub(r"(?<=\w)-(?=\w)", " ", kw_exclude)
+                                query += f" AND ocr_text NOT LIKE '%{kw_exclude}%'"
 
                 else:
-                    # 不使用相近字形搜索：直接遍历所有空格区分开的关键词
-                    conditions = []
-                    for keyword in keywords:
-                        # Convert the "-" hyphen to spaces
-                        keyword = re.sub(r"(?<=\w)-(?=\w)", " ", keyword)
-                        conditions.append(f"(ocr_text LIKE '%{keyword}%') OR (win_title LIKE '%{keyword}%')")
-                    query += " AND ".join(conditions)
+                    # 关键词为空，搜索全部
+                    query = "SELECT * FROM video_text"
+                    params = ()
 
-            else:  # 关键词为空
-                query += f"ocr_text LIKE '%{keyword_input}%'"
+                # 限定时间范围（使用参数化查询避免 SQL 注入）
+                query += " AND videofile_time BETWEEN ? AND ?"
+                params = params + (date_in_ts, date_out_ts)
 
-            # 是否排除关键词
-            if keyword_input_exclude and not keyword_input_exclude.isspace():
-                query += " AND "
-                keywords_exclude = keyword_input_exclude.split()
-                conditions = []
-                for keyword_exclude in keywords_exclude:
-                    # Convert the "-" hyphen to spaces
-                    keyword_exclude = re.sub(r"(?<=\w)-(?=\w)", " ", keyword_exclude)
-                    conditions.append(f"ocr_text NOT LIKE '%{keyword_exclude}%'")
-                query += " AND ".join(conditions)
+                logger.info(f"SQL: {query}")
+                df = pd.read_sql_query(query, conn, params=params)
+                return df
 
-            # 限定查询的时间范围
-            query += f" AND (videofile_time BETWEEN {date_in_ts} AND {date_out_ts})"
+            except Exception as e:
+                logger.error(f"Query failed for {key}: {e}")
+                return pd.DataFrame()
+            finally:
+                conn.close()
 
-            logger.info(f"SQL query:\n {query}")
-            df = pd.read_sql_query(query, conn)
-
-            # 查询所有关键词和时间段下的结果
-            # if keyword_input_exclude:
-            #     df = pd.read_sql_query(f"""
-            #                           SELECT * FROM video_text
-            #                           WHERE ocr_text LIKE '%{keyword_input}%'
-            #                           AND ocr_text NOT LIKE '%{keyword_input_exclude}%'
-            #                           AND videofile_time BETWEEN {date_in_ts} AND {date_out_ts} """
-            #                            , conn)
-            # else:
-            #     df = pd.read_sql_query(f"""
-            #                           SELECT * FROM video_text
-            #                           WHERE ocr_text LIKE '%{keyword_input}%'
-            #                           AND videofile_time BETWEEN {date_in_ts} AND {date_out_ts} """
-            #                            , conn)
-
-            df_all = pd.concat([df_all, df], ignore_index=True)
-            conn.close()
+        if len(query_db_name_list) > 1:
+            # 多个月份数据库并行查询
+            with ThreadPoolExecutor(max_workers=min(len(query_db_name_list), 4)) as executor:
+                futures = {executor.submit(_query_single_db, key): key for key in query_db_name_list}
+                for future in as_completed(futures):
+                    df = future.result()
+                    if df is not None and len(df) > 0:
+                        df_all = pd.concat([df_all, df], ignore_index=True)
+        else:
+            for key in query_db_name_list:
+                df = _query_single_db(key)
+                if df is not None and len(df) > 0:
+                    df_all = pd.concat([df_all, df], ignore_index=True)
 
         row_count = len(df_all)
         page_count_all = int(math.ceil(int(row_count) / int(self.db_max_page_result)))
