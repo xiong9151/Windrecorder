@@ -35,6 +35,28 @@ if config.img_embed_module_install:
 # 使用 streamlit state 来进行通信
 
 
+# 嵌入模型闲置超时时间（秒）：超过此时间无操作则自动销毁释放内存
+EMB_MODEL_IDLE_TIMEOUT = 300  # 5 分钟
+
+
+def _clear_emb_model_from_session():
+    """从 session state 中移除嵌入模型，释放 GPU/CPU 内存"""
+    for key in ["emb_model_text", "emb_model_image", "emb_processor_text", "emb_processor_image", "emb_model_last_used"]:
+        if key in st.session_state:
+            del st.session_state[key]
+    try:
+        from windrecorder import img_embed_manager
+
+        img_embed_manager.clear_model_cache()
+    except Exception:
+        pass
+
+
+def _refresh_emb_model_timer():
+    """刷新模型使用时间戳，延长自动销毁倒计时"""
+    st.session_state["emb_model_last_used"] = time.time()
+
+
 def render():
     search_col, video_col = st.columns([1, 2])
     with search_col:
@@ -61,6 +83,18 @@ def render():
                 _t("gs_option_img_emb_search"),
                 _t("gs_option_similar_img_search"),
             ]
+        # 检查嵌入模型是否超时闲置：如果模型已加载但超过 EMB_MODEL_IDLE_TIMEOUT
+        # 没有被使用（刷新时间戳），则自动销毁释放内存。
+        # 这覆盖了：
+        #   - 用户在图像搜索内不做任何操作
+        #   - 用户切换到其他标签页
+        #   - 用户关闭浏览器
+        # 注意：Streamlit 的 st.tabs() 每次 rerun 都会执行所有 tab 的代码，
+        # 所以 render() 在用户看其他标签页时也会被调用，这是我们的定时检查机会。
+        if "emb_model_last_used" in st.session_state and "emb_model_text" in st.session_state:
+            idle_time = time.time() - st.session_state["emb_model_last_used"]
+            if idle_time > EMB_MODEL_IDLE_TIMEOUT:
+                _clear_emb_model_from_session()
 
         # OCR 文本搜索
         if "search_content" not in st.session_state:
@@ -105,6 +139,13 @@ def render():
             在切换搜索方式后，清理之前搜索留下的 tab 下其他 UI 部分使用到的数据
             """
             st.session_state.search_content = ""
+
+            # 从图像搜索切换到文字搜索时，销毁模型释放资源
+            if st.session_state.search_method_selected in [
+                st.session_state.search_method_list[0],
+                st.session_state.search_method_list[1],
+            ]:
+                _clear_emb_model_from_session()
 
         # 绘制抬头部分的 UI
         components.web_onboarding()
@@ -342,9 +383,6 @@ def ui_vector_img_search():
     """
     图像语义搜索：使用自然语言匹配检索图像
     """
-    # 预加载嵌入模型，这样每次搜索就不需要重复加载、提升时间
-    components.load_emb_model_cache()
-
     # 获得全局图像语义搜索结果
     def do_global_vector_img_search():
         # 如果搜索所需入参状态改变了，进行搜索
@@ -365,6 +403,10 @@ def ui_vector_img_search():
         st.session_state.page_index = 1
 
         with st.spinner(_t("gs_text_searching")):
+            # 加载模型（可能已被闲置超时销毁，重新加载）
+            components.load_emb_model_cache()
+            _refresh_emb_model_timer()  # 刷新模型闲置计时
+
             st.session_state.timeCost_globalSearch = time.time()  # 预埋搜索用时
             text_vector = img_embed_manager.embed_text(
                 model_text=st.session_state["emb_model_text"],
@@ -391,6 +433,7 @@ def ui_vector_img_search():
             if config.enable_synonyms_recommend:
                 st.session_state.synonyms_recommend_list = get_query_synonyms(keyword=st.session_state.search_content)  # 获取近义词
             st.session_state.timeCost_globalSearch = round(time.time() - st.session_state.timeCost_globalSearch, 5)  # 回收搜索用时
+            _refresh_emb_model_timer()  # 刷新模型闲置计时
 
     # 图像语义搜索 UI
     col_text_query_content, col_date_range, col_page = st.columns([3, 2, 1.5])
@@ -408,9 +451,6 @@ def ui_similar_img_search():
     """
     以图搜图
     """
-    # 预加载嵌入模型，这样每次搜索就不需要重复加载、提升时间
-    components.load_emb_model_cache()
-
     def do_global_similar_img_search():
         # 如果搜索所需入参状态改变了，进行搜索
         if (
@@ -433,7 +473,9 @@ def ui_similar_img_search():
         st.session_state.page_index = 1
 
         with st.spinner(_t("gs_text_searching")):
-            st.session_state.timeCost_globalSearch = time.time()  # 预埋搜索用时
+            # 加载模型（可能已被闲置超时销毁，重新加载）
+            components.load_emb_model_cache()
+            _refresh_emb_model_timer()  # 刷新模型闲置计时
             img_vector = img_embed_manager.embed_img(
                 model_image=st.session_state["emb_model_image"],
                 processor_image=st.session_state["emb_processor_image"],
@@ -458,6 +500,7 @@ def ui_similar_img_search():
             )
             st.session_state.search_content = "img"
             st.session_state.timeCost_globalSearch = round(time.time() - st.session_state.timeCost_globalSearch, 5)  # 回收搜索用时
+            _refresh_emb_model_timer()  # 刷新模型闲置计时
 
     st.session_state.similar_img_file_input = st.file_uploader(
         _t("gs_text_upload_img"), type=["png", "jpg", "webp"], accept_multiple_files=False, help=_t("gs_text_upload_img_help")
@@ -520,16 +563,30 @@ def show_and_locate_video_timestamp_by_df(df, num):
 
     # TODO 获取有多少行结果 对num进行合法性判断
     df_videofile_name = df.iloc[num]["videofile_name"]
-    video_filename = file_utils.check_video_exist_in_videos_dir(df_videofile_name)
+    video_filename, video_source = file_utils.check_video_exist_anywhere(df_videofile_name)
     if video_filename:
         vid_timestamp = utils.calc_vid_inside_time(df, num)
         st.session_state.vid_vid_timestamp = vid_timestamp
 
-        video_filepath = file_utils.convert_vid_filename_as_vid_filepath(video_filename)
-        video_file = open(video_filepath, "rb")
-        video_bytes = video_file.read()
-        with st.empty():
-            st.video(video_bytes, start_time=st.session_state.vid_vid_timestamp)
+        if video_source == "webdav":
+            # 从 WebDAV 下载到本地缓存，用 Python requests 在服务端认证（无跨域问题）
+            actual_name, cache_path = file_utils.get_webdav_video_bytes(video_filename)
+            if cache_path:
+                with open(cache_path, "rb") as video_file:
+                    video_bytes = video_file.read()
+                with st.empty():
+                    st.video(video_bytes, start_time=st.session_state.vid_vid_timestamp)
+                st.markdown(f"`WebDAV: {video_filename}`")
+            else:
+                st.warning(_t("gs_text_video_file_not_on_disk").format(df_videofile_name=df_videofile_name), icon="🦫")
+                return
+        else:
+            video_filepath = file_utils.convert_vid_filename_as_vid_filepath(video_filename)
+            video_file = open(video_filepath, "rb")
+            video_bytes = video_file.read()
+            with st.empty():
+                st.video(video_bytes, start_time=st.session_state.vid_vid_timestamp)
+            st.markdown(f"`{video_filepath}`")
         if (
             config.enable_ocr_str_highlight_indicator
             and st.session_state.search_method_list.index(st.session_state.search_method_selected) <= 1
@@ -540,7 +597,6 @@ def show_and_locate_video_timestamp_by_df(df, num):
                 )
             except Exception as e:
                 st.error(e)
-        st.markdown(f"`{video_filepath}`")
         if df.iloc[num]["deep_linking"]:
             components.render_deep_linking(df.iloc[num]["deep_linking"])
     else:
@@ -579,4 +635,5 @@ def get_query_synonyms(keyword, lang=config.lang):
         )
         prob_res = st.session_state.synonyms_vdb.search_vector(vector=keyword_vector, k=3)
         word_res = [st.session_state.synonyms_words[i[0]] for i in prob_res]
+        _refresh_emb_model_timer()  # 刷新模型闲置计时
     return word_res

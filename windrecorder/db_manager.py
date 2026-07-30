@@ -403,7 +403,7 @@ class _DBManager:
         )
         df["thumbnail"] = "data:image/png;base64," + df["thumbnail"]
 
-        # 磁盘上有无对应视频检测
+        # 磁盘上有无对应视频检测（含 WebDAV 回退）
         cache_videofile_ondisk_str = ""
         if cache_videofile_ondisk_list is None:
             cache_videofile_ondisk_str = cache_videofile_ondisk_str.join(
@@ -414,6 +414,9 @@ class _DBManager:
 
         def is_videofile_ondisk(filename, video_ondisk_str):
             if filename[:19] in video_ondisk_str:
+                return True
+            # 如果启用了 WebDAV，也标记为可用（不区分来源，用户能看到即可）
+            if config.enable_webdav_video_storage:
                 return True
             else:
                 return False

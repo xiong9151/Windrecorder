@@ -93,11 +93,6 @@ def main_webui():
 
     web_footer_state()
 
-    # 尝试预加载嵌入模型
-    if config.img_embed_module_install and config.enable_synonyms_recommend:
-        windrecorder.ui.components.load_emb_model_cache()
-
-
 # 检查 webui 是否启用密码保护
 if "webui_password_accessed" not in st.session_state:
     st.session_state["webui_password_accessed"] = False
@@ -114,16 +109,3 @@ if config.webui_access_password_md5 and st.session_state.webui_password_accessed
 if not config.webui_access_password_md5 or st.session_state.webui_password_accessed is True:
     main_webui()
 
-if config.img_embed_module_install:
-    try:
-        import windrecorder.img_embed_manager as img_embed_manager
-
-        # 预加载模型以提高首次查询速度
-        try:
-            img_embed_manager.get_model_and_processor()
-            print("图像嵌入模型预加载成功")
-        except Exception as e:
-            print(f"图像嵌入模型预加载失败: {e}")
-            
-    except ImportError:
-        print("无法导入图像嵌入模块")

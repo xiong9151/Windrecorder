@@ -1,5 +1,6 @@
 import datetime
 import os
+import tempfile
 
 import pandas as pd
 import streamlit as st
@@ -501,7 +502,27 @@ def render():
 # 直接定位视频时间码、展示视频
 def show_and_locate_video_timestamp_by_filename_and_time(video_file_name, timestamp):
     st.session_state.day_timestamp = int(timestamp)
-    # 合并视频文件路径
+
+    # 先检查 WebDAV（如果启用）
+    if config.enable_webdav_video_storage:
+        actual_name, source = file_utils.check_video_exist_anywhere(video_file_name)
+        if source == "webdav":
+            # 从 WebDAV 下载到本地缓存，用 Python requests 在服务端认证（无跨域问题）
+            actual_name, cache_path = file_utils.get_webdav_video_bytes(actual_name)
+            if cache_path:
+                with open(cache_path, "rb") as video_file:
+                    video_bytes = video_file.read()
+                with st.empty():
+                    if st.session_state.day_timestamp < 0:
+                        st.toast(f"invalid locate timestamp: {st.session_state.day_timestamp}, set to 1s.")
+                        st.session_state.day_timestamp = 1
+                    st.video(video_bytes, start_time=st.session_state.day_timestamp)
+                st.markdown(f"`WebDAV: {actual_name}`")
+                return
+            else:
+                st.info("WebDAV 视频读取失败，回退到本地检查...", icon="🎐")
+
+    # 本地磁盘读取
     videofile_path_month_dir = file_utils.convert_vid_filename_as_YYYY_MM(video_file_name)  # 获取对应的日期目录
     videofile_path = os.path.join(config.record_videos_dir_ud, videofile_path_month_dir, video_file_name)
     logger.info(f"webui: videofile_path: {videofile_path}")

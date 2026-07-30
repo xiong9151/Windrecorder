@@ -1,8 +1,11 @@
 import hashlib
+import re
 import subprocess
 import time
+import urllib.parse
 from pathlib import Path
 
+import requests
 import streamlit as st
 from PIL import Image
 
@@ -328,6 +331,134 @@ def render():
 
         st.divider()
 
+        # WebDAV 云盘存储配置
+        with st.expander("☁️ WebDAV 云盘视频存储（可选）", expanded=True):
+            st.markdown(
+                "如果视频文件过大存储在支持 WebDAV 的云盘中，可以在此配置。"
+                "路径格式需与本地 `videos/` 目录保持一致（按年月分文件夹）。"
+            )
+            config_enable_webdav = st.checkbox(
+                "启用 WebDAV 视频存储",
+                value=config.enable_webdav_video_storage,
+                help="启用后，搜索页面会同时检查 WebDAV 云盘上的视频文件。优先选择本地文件。",
+            )
+            config_webdav_url = st.text_input(
+                "WebDAV 服务器地址",
+                value=config.webdav_url,
+                placeholder="https://example.com/remote.php/dav/files/username/",
+                help="WebDAV 服务器的根目录 URL，注意结尾的 /",
+            )
+            config_webdav_username = st.text_input(
+                "用户名",
+                value=config.webdav_username,
+                placeholder="username",
+            )
+            config_webdav_password = st.text_input(
+                "密码/应用密码",
+                value=config.webdav_password,
+                type="password",
+                placeholder="password",
+            )
+            config_webdav_videos_dir = st.text_input(
+                "视频目录（相对于 WebDAV 根目录）",
+                value=config.webdav_videos_dir,
+                placeholder="videos",
+                help="需与本地 videos/ 目录结构一致，即内部按 YYYY-MM/ 文件夹组织视频文件",
+            )
+
+            # 校验 WebDAV 连接
+            if st.button("🔍 测试 WebDAV 连接", key="test_webdav_btn", use_container_width=True):
+                if not config_webdav_url or not config_webdav_username:
+                    st.warning("请先填写服务器地址和用户名", icon="⚠️")
+                else:
+                    with st.spinner("正在测试 WebDAV 连接..."):
+                        try:
+                            from windrecorder.webdav_utils import WebDAVClient
+
+                            wd_test = WebDAVClient(
+                                base_url=config_webdav_url,
+                                username=config_webdav_username,
+                                password=config_webdav_password,
+                                videos_dir=config_webdav_videos_dir,
+                            )
+
+                            # 1. 测试根目录连接
+                            test_resp = wd_test.propfind("", depth="0")
+                            if test_resp is None or test_resp.status_code not in (200, 207, 301, 302):
+                                st.error(f"❌ 无法连接到 WebDAV 服务器（状态码: {test_resp.status_code if test_resp else '无响应'}）", icon="🚫")
+                            else:
+                                st.success(f"✅ 服务器连接成功（{wd_test.base_url}）", icon="🌐")
+
+                                # 2. 测试视频目录
+                                top_items = wd_test.list_dir()
+                                video_dir_ok = config_webdav_videos_dir.strip("/") in top_items or any(
+                                    config_webdav_videos_dir.strip("/") in item for item in top_items
+                                )
+                                month_dirs_in_video = []
+                                month_video_count = 0
+                                first_video_file = None
+                                first_video_month = None
+
+                                if video_dir_ok:
+                                    st.success(f"✅ 视频目录 `{config_webdav_videos_dir}/` 存在", icon="📁")
+                                    # 列出所有月份子目录
+                                    month_dirs = [d for d in wd_test.list_dir() if re.match(r"^\d{4}-\d{2}$", d)]
+                                    if month_dirs:
+                                        month_dirs_in_video = month_dirs
+                                        st.info(f"📂 找到 {len(month_dirs)} 个月份目录: `{'`, `'.join(month_dirs[:5])}{'...' if len(month_dirs) > 5 else ''}`")
+                                        # 查找视频文件
+                                        for m in month_dirs:
+                                            files = [f for f in wd_test.list_dir(m) if f.endswith(".mp4")]
+                                            month_video_count += len(files)
+                                            if not first_video_file and files:
+                                                first_video_file = files[0]
+                                                first_video_month = m
+                                                break
+                                        if month_video_count > 0:
+                                            st.success(f"✅ 共找到 {month_video_count} 个视频文件", icon="🎬")
+                                        else:
+                                            st.warning("⚠️ 月份目录下没有找到 .mp4 视频文件", icon="📭")
+                                    else:
+                                        st.warning("⚠️ 视频目录下没有找到 `YYYY-MM` 格式的月份子目录", icon="📂")
+                                else:
+                                    st.error(f"❌ 视频目录 `{config_webdav_videos_dir}/` 不存在或无法访问", icon="📁")
+                                    # 列出根目录下的所有条目供参考
+                                    if top_items:
+                                        st.info(f"根目录下现有条目: `{'`, `'.join(top_items[:10])}`")
+                                    else:
+                                        st.info("根目录为空或无法列出内容")
+
+                                # 3. 测试视频播放 - 方式1: 通过代理验证读取能力
+                                if first_video_file and first_video_month:
+                                    st.markdown("---")
+                                    st.markdown("**🎬 视频播放测试**")
+                                    st.caption(f"测试文件: `{first_video_month}/{first_video_file}`")
+                                    try:
+                                        test_actual_name = wd_test.check_video_exist(first_video_file)
+                                        if test_actual_name:
+                                            # 先用 requests 直接读取视频文件，验证连通性
+                                            try:
+                                                test_data = wd_test.get_file(wd_test.get_video_filepath(test_actual_name))
+                                                if test_data and len(test_data) > 1024:
+                                                    st.success(f"✅ 可通过 WebDAV 读取视频文件 ({len(test_data) / 1024 / 1024:.1f} MB)", icon="📦")
+                                                else:
+                                                    st.error("❌ 无法读取视频文件内容", icon="💾")
+                                            except Exception as e:
+                                                st.error(f"❌ 读取失败: {e}", icon="💾")
+                                        else:
+                                            st.error("❌ 无法找到匹配的视频文件", icon="🎬")
+                                    except Exception as e:
+                                        st.error(f"❌ 视频读取测试失败: {e}", icon="🎬")
+
+                                else:
+                                    st.markdown("---")
+                                    st.info("💡 未找到视频文件，无法进行播放测试。请确保 `videos/` 目录下有 `YYYY-MM/` 子目录和 .mp4 文件。", icon="📹")
+
+                        except Exception as e:
+                            st.error(f"❌ 连接测试异常: {e}", icon="🚫")
+
+        st.divider()
+
         if st.button(
             "Save and Apply All Changes / " + _t("text_apply_changes")
             if config.lang != "en"
@@ -382,6 +513,23 @@ def render():
                 )
             elif len(config_webui_access_password) == 0:
                 config.set_and_save_config("webui_access_password_md5", "")
+
+            # 保存 WebDAV 配置（如果变更了则重置客户端）
+            webdav_changed = (
+                config_enable_webdav != config.enable_webdav_video_storage
+                or config_webdav_url != config.webdav_url
+                or config_webdav_username != config.webdav_username
+                or config_webdav_password != config.webdav_password
+                or config_webdav_videos_dir != config.webdav_videos_dir
+            )
+            config.set_and_save_config("enable_webdav_video_storage", config_enable_webdav)
+            config.set_and_save_config("webdav_url", config_webdav_url)
+            config.set_and_save_config("webdav_username", config_webdav_username)
+            config.set_and_save_config("webdav_password", config_webdav_password)
+            config.set_and_save_config("webdav_videos_dir", config_webdav_videos_dir)
+            if webdav_changed:
+                from windrecorder.webdav_utils import reset_webdav_client
+                reset_webdav_client()
             st.toast(_t("utils_toast_setting_saved"), icon="🦝")
             time.sleep(1)
             st.rerun()

@@ -47,6 +47,26 @@ MODEL_NAME = "unum-cloud/uform3-image-text-multilingual-base"
 _model_cache = {}
 
 
+def clear_model_cache():
+    """
+    清除模型缓存，释放 GPU/CPU 内存。
+    调用后下次 get_model_and_processor() 会重新加载模型。
+    """
+    global _model_cache
+    _model_cache = {}
+    import gc
+    gc.collect()
+    # 如果使用 PyTorch GPU，清空 CUDA 缓存
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("CUDA cache cleared")
+    except ImportError:
+        pass
+    logger.info("Model cache cleared")
+
+
 def _to_numpy(tensor_or_array):
     """将 torch Tensor 或 numpy array 统一转为 numpy array，兼容 GPU 张量"""
     if hasattr(tensor_or_array, "cpu"):

@@ -122,6 +122,11 @@ class Config:
         convert_screenshots_to_vid_energy_saving_mode,
         enable_ocr_str_highlight_indicator,
         recycle_deleted_files,
+        enable_webdav_video_storage=False,
+        webdav_url="",
+        webdav_username="",
+        webdav_password="",
+        webdav_videos_dir="videos",
         compress_cpu_threads=None,
         **other_field,
     ) -> None:
@@ -232,6 +237,11 @@ class Config:
         )
         self.enable_ocr_str_highlight_indicator = enable_ocr_str_highlight_indicator
         self.recycle_deleted_files = recycle_deleted_files
+        self.enable_webdav_video_storage = enable_webdav_video_storage
+        self.webdav_url = webdav_url
+        self.webdav_username = webdav_username
+        self.webdav_password = webdav_password
+        self.webdav_videos_dir = webdav_videos_dir
 
     def set_and_save_config(self, attr: str, value):
         if not hasattr(self, attr):
