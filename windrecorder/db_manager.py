@@ -340,7 +340,7 @@ class _DBManager:
 
                 else:
                     # 关键词为空，搜索全部
-                    query = "SELECT * FROM video_text"
+                    query = "SELECT * FROM video_text WHERE 1=1"
                     params = ()
 
                 # 限定时间范围（使用参数化查询避免 SQL 注入）
