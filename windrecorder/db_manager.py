@@ -292,7 +292,8 @@ class _DBManager:
 
         def _query_single_db(key):
             """在单个数据库中执行查询，返回结果 DataFrame"""
-            db_filepath = os.path.join(self.db_path, key)
+            # 使用缓存复制：避免与写入进程冲突，同时缓存命中时无需重复复制
+            db_filepath = self.get_temp_dbfilepath(os.path.join(self.db_path, key))
             logger.info(f"Querying {db_filepath}")
 
             conn = sqlite3.connect(db_filepath)
