@@ -184,9 +184,16 @@ def extract_iframe(video_file, iframe_path, iframe_interval=4000):
 
     # 检查 ffmpeg CUDA 硬件解码是否可用，有则用 GPU 加速
     if _ffmpeg_cuda_available():
-        logger.info("ffmpeg CUDA hardware acceleration available, using GPU decode.")
-        extract_iframe_by_ffmpeg(video_file, iframe_path, use_cuda=True)
-        return
+        logger.info("ffmpeg CUDA hardware acceleration available, trying GPU decode.")
+        try:
+            extract_iframe_by_ffmpeg(video_file, iframe_path, use_cuda=True)
+            return
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"ffmpeg CUDA decode failed for {video_file}: {e}. Falling back to CPU decode.")
+            shutil.rmtree(iframe_path, ignore_errors=True)
+            file_utils.ensure_dir(iframe_path)
+            extract_iframe_by_ffmpeg(video_file, iframe_path, use_cuda=False)
+            return
 
     codec = get_video_codec(video_file)
     if codec in ["av1", "av01"]:
@@ -266,8 +273,17 @@ def crop_iframe(directory):
         left_percent.append(config.ocr_image_crop_URBL[i * 4 + 2] * 0.01)
         right_percent.append(config.ocr_image_crop_URBL[i * 4 + 3] * 0.01)
 
-    # 获取目录下所有图片文件
-    image_files = [f for f in os.listdir(directory) if f.endswith((".jpg", ".jpeg", ".png"))]
+    # 获取目录下所有图片文件，排除非图片文件
+    image_files = []
+    for f in os.listdir(directory):
+        if not f.endswith((".jpg", ".jpeg", ".png")):
+            continue
+        if "_cropped" in f:
+            continue
+        # 排除百度云盘等同步工具的残留文件
+        if ".baiduyun" in f or ".cloud" in f or ".tmp" in f or ".temp" in f:
+            continue
+        image_files.append(f)
 
     # 循环处理每个图片文件
     for file_name in image_files:
@@ -280,7 +296,12 @@ def crop_iframe(directory):
         draw = ImageDraw.Draw(image)
 
         # 校验图片
-        img_width, img_height = image.size
+        try:
+            img_width, img_height = image.size
+        except Exception:
+            logger.warning(f"crop_iframe: cannot read image {file_path}, skipping")
+            os.remove(file_path)
+            continue
         fallback_condition = False
         display_index = -1
         if not config.record_single_display_index <= len(display_info):  # 当记录的显示器索引不存在于所有显示器中时，当作一个完整显示器使用默认参数处理
