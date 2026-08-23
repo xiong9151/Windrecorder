@@ -992,6 +992,75 @@ def try_empty_cache_dir_in_idle_routine():
             file_utils.empty_directory("cache")
     except Exception as e:
         logger.warning(f"empty cache dir fail: {e}")
+
+
+def try_clean_iframe_dir_in_idle_routine():
+    """
+    在空闲时清理已经不需要的 iframe 临时图片目录。
+
+    当启用图像嵌入时，OCR 不清理 iframe（留给嵌入流程用）。
+    但如果嵌入流程被中断或跳过，iframe 目录会堆积。
+    此函数清理那些不再需要的目录：
+      - 视频已标记 -OCRED-NODATA（无文字，嵌入直接跳过）
+      - 视频已标记 -OCRED-IMGEMB（嵌入已完成）
+      - 视频已标记 -SCREENSHOTS-OCRED-IMGEMB（截图模式，嵌入已完成）
+      - 对应的视频文件已不存在
+      - 超过 7 天的旧目录（安全网兜底）
+    """
+    iframe_dir = config.iframe_dir
+    if not os.path.isdir(iframe_dir):
+        return
+
+    now = time.time()
+    MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 天兜底
+    cleaned = 0
+
+    for dir_name in os.listdir(iframe_dir):
+        dir_path = os.path.join(iframe_dir, dir_name)
+        if not os.path.isdir(dir_path):
+            continue
+
+        should_delete = False
+
+        # 策略 1：检查对应的视频文件是否已标记嵌入完成
+        # 视频文件存储在 userdata/videos/YYYY-MM/ 下
+        dir_age = now - os.path.getmtime(dir_path)
+        yyyy_mm = dir_name[:7] if len(dir_name) >= 7 else ""
+        video_dir = os.path.join(config.record_videos_dir_ud, yyyy_mm) if yyyy_mm else None
+
+        if video_dir and os.path.isdir(video_dir):
+            matched_videos = [
+                f for f in os.listdir(video_dir)
+                if f.startswith(dir_name) and f.endswith(".mp4")
+            ]
+            for v in matched_videos:
+                # 嵌入已完成或不需要嵌入
+                if "-IMGEMB" in v or "-NODATA" in v:
+                    should_delete = True
+                    break
+                # 视频已损坏或被跳过
+                if "-ERROR" in v:
+                    should_delete = True
+                    break
+        else:
+            # 对应的月份目录不存在，说明视频早已被删除
+            if dir_age > 3600:  # 至少 1 小时后才删除，避免竞态
+                should_delete = True
+
+        # 策略 2：超过 7 天的兜底清理
+        if not should_delete and dir_age > MAX_AGE_SECONDS:
+            should_delete = True
+
+        if should_delete:
+            try:
+                shutil.rmtree(dir_path)
+                cleaned += 1
+                logger.debug(f"Cleaned orphan iframe dir: {dir_name}")
+            except Exception as e:
+                logger.warning(f"Failed to clean iframe dir {dir_name}: {e}")
+
+    if cleaned > 0:
+        logger.info(f"Cleaned {cleaned} orphan iframe directories")
         
 # 录制时的编码器预设参数备选列表，按照设备兼容性优先级排序
 # - preset: 编码器预设名称，用于匹配配置文件中的record_encoder
