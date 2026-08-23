@@ -1005,14 +1005,12 @@ def try_clean_iframe_dir_in_idle_routine():
       - 视频已标记 -OCRED-IMGEMB（嵌入已完成）
       - 视频已标记 -SCREENSHOTS-OCRED-IMGEMB（截图模式，嵌入已完成）
       - 对应的视频文件已不存在
-      - 超过 7 天的旧目录（安全网兜底）
     """
     iframe_dir = config.iframe_dir
     if not os.path.isdir(iframe_dir):
         return
 
     now = time.time()
-    MAX_AGE_SECONDS = 7 * 24 * 3600  # 7 天兜底
     cleaned = 0
 
     for dir_name in os.listdir(iframe_dir):
@@ -1046,10 +1044,6 @@ def try_clean_iframe_dir_in_idle_routine():
             # 对应的月份目录不存在，说明视频早已被删除
             if dir_age > 3600:  # 至少 1 小时后才删除，避免竞态
                 should_delete = True
-
-        # 策略 2：超过 7 天的兜底清理
-        if not should_delete and dir_age > MAX_AGE_SECONDS:
-            should_delete = True
 
         if should_delete:
             try:
