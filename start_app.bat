@@ -26,4 +26,4 @@ call conda activate py311
 
 set SSL_CERT_FILE=%CONDA_PREFIX%\Lib\site-packages\certifi\cacert.pem
 
-python "%~dp0\main.py"
+"%CONDA_PREFIX%\Windrecorder.exe" "%~dp0\main.py"

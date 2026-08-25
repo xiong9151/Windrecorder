@@ -44,6 +44,11 @@ from streamlit.file_util import get_streamlit_file_path
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 os.chdir(PROJECT_ROOT)
 
+# Windrecorder 专用的解释器路径（conda 环境中的 Windrecorder.exe）
+_WINDRECORDER_EXE = os.path.join(sys.prefix, "Windrecorder.exe")
+if not os.path.exists(_WINDRECORDER_EXE):
+    _WINDRECORDER_EXE = sys.executable
+
 from windrecorder import file_utils, flag_mark_note, utils, win_ui  # NOQA: E402
 from windrecorder.config import config  # NOQA: E402
 from windrecorder.const import HIDE_CLI_TRIGGER  # NOQA: E402
@@ -119,7 +124,7 @@ def start_stop_webui(icon: pystray.Icon, item: pystray.MenuItem):
         with open(WEBUI_STDOUT_PATH, "w", encoding="utf-8") as out, open(WEBUI_STDERR_PATH, "w", encoding="utf-8") as err:
             streamlit_process = Popen(
                 [
-                    sys.executable,
+                    _WINDRECORDER_EXE,
                     "-u",
                     "-m",
                     "streamlit",
@@ -184,7 +189,7 @@ def start_stop_recording(icon: pystray.Icon | None = None, item: pystray.MenuIte
             RECORDING_STDERR_PATH, "w", encoding="utf-8"
         ) as err:
             recording_process = Popen(
-                [sys.executable, "-u", "record_screen.py"],
+                [_WINDRECORDER_EXE, "-u", "record_screen.py"],
                 stdout=out,
                 stderr=err,
                 encoding="utf-8",
@@ -333,7 +338,7 @@ def main():
             with open(config.tray_lock_path, encoding="utf-8") as f:
                 check_pid = int(f.read())
 
-            tray_is_running = utils.is_process_running(check_pid, compare_process_name="python.exe")
+            tray_is_running = utils.is_process_running(check_pid, compare_process_name="Windrecorder.exe")
             if tray_is_running:
                 interrupt_start()
             else:

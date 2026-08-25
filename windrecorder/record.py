@@ -154,7 +154,7 @@ def is_recording():
         logger.error(f"record: Screen recording service file lock contains invalid data: {repr(content)}")
         return False
 
-    return utils.is_process_running(check_pid, "python.exe")
+    return utils.is_process_running(check_pid, "Windrecorder.exe")
 
 
 # 获取视频的原始分辨率

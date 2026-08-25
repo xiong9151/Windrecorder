@@ -94,7 +94,7 @@ while True:
         with open(config.img_emb_lock_path, encoding="utf-8") as f:
             check_pid = int(f.read())
 
-        tray_is_running = utils.is_process_running(check_pid, compare_process_name="python.exe")
+        tray_is_running = utils.is_process_running(check_pid, compare_process_name="Windrecorder.exe")
         if tray_is_running:
             subprocess.run("cls", shell=True)
             print(
