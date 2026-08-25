@@ -63,7 +63,18 @@ def idle_maintain_process_main():
     idle_maintaining_in_process = True
     try:
         logger.info("start idle maintain processing")
+
+        def _user_is_back():
+            """检查用户是否回来了（屏幕内容有变化），返回 True 表示需要停止维护"""
+            if monitor_idle_minutes < config.screentime_not_change_to_pause_record:
+                logger.info("idle maintain: user appears to be back, will stop after current task")
+                return True
+            return False
+
         threading.Thread(target=ocr_manager.ocr_manager_main, daemon=True).start()
+        if _user_is_back():
+            return
+
         # 图像语义嵌入
         if config.enable_img_embed_search and config.img_embed_module_install:
             try:
@@ -72,6 +83,8 @@ def idle_maintain_process_main():
                     img_embed_manager.all_videofile_do_img_embedding_routine(
                         video_queue_batch=config.batch_size_embed_video_in_idle
                     )
+                if _user_is_back():
+                    return
             except LockExistsException:
                 with open(config.tray_lock_path, encoding="utf-8") as f:
                     check_pid = int(f.read())
@@ -83,6 +96,7 @@ def idle_maintain_process_main():
                         os.remove(config.tray_lock_path)
                     except FileNotFoundError:
                         pass
+
         # 将缓存截图转换为视频
         condition_convert_screenshots_to_vid = True
         if config.convert_screenshots_to_vid_energy_saving_mode != 0 and not utils.is_power_plugged_in():
@@ -90,10 +104,16 @@ def idle_maintain_process_main():
 
         if condition_convert_screenshots_to_vid:
             record.index_cache_screenshots_dir_process()
+        if _user_is_back():
+            return
+
         # 清理过期与已转换为视频的截图缓存文件夹
         record.clean_cache_screenshots_dir_process()
         # 清理过时视频
         ocr_manager.remove_outdated_videofiles(video_queue_batch=config.batch_size_remove_video_in_idle)
+        if _user_is_back():
+            return
+
         # 压缩过期视频
         record.compress_outdated_videofiles(video_queue_batch=config.batch_size_compress_video_in_idle)
         # 清理iframe目录
