@@ -116,6 +116,21 @@ def initialize_third_part_ocr_engine(ocr_engine_name=config.ocr_engine):
             # 启动ocr服务
             wx_ocr_manager.StartWeChatOCR()
 
+            # 将 WeChatOCR.exe 绑定到 E 核心（逻辑核心 16-31），避免占用 P 核影响系统稳定性
+            try:
+                import psutil
+                for proc in psutil.process_iter(["pid", "name"]):
+                    if "WeChatOCR" in proc.info["name"]:
+                        p = psutil.Process(proc.info["pid"])
+                        # 13900HX 有 8 P-cores(0-15 HT) + 16 E-cores(16-31)
+                        # 绑定到 E-cores: 16-31
+                        e_cores = list(range(16, 32))
+                        p.cpu_affinity(e_cores)
+                        logger.info(f"WeChatOCR.exe (PID={proc.info['pid']}) bound to E-cores 16-31")
+                        break
+            except Exception as e:
+                logger.warning(f"Failed to set WeChatOCR CPU affinity: {e}")
+
             third_party_ocr_actived_manager["WeChatOCR"] = True
         except Exception as e:
             logger.error(f"Failed to initialize WeChatOCR engine: {e}, reset to default.")
