@@ -88,7 +88,7 @@ def idle_maintain_process_main():
             except LockExistsException:
                 with open(config.tray_lock_path, encoding="utf-8") as f:
                     check_pid = int(f.read())
-                img_emb_is_running = utils.is_process_running(check_pid, compare_process_name="Windrecorder.exe")
+                img_emb_is_running = utils.is_process_running(check_pid, compare_process_name="python.exe")
                 if img_emb_is_running:
                     logger.warning("another img embedding indexing is running.")
                 else:
