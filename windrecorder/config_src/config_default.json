@@ -124,5 +124,6 @@
   "webdav_url": "",
   "webdav_username": "",
   "webdav_password": "",
-  "webdav_videos_dir": "videos"
+  "webdav_videos_dir": "videos",
+  "bind_to_e_cores": false
 }

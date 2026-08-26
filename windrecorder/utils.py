@@ -563,6 +563,39 @@ def get_current_version():
     return local_version
 
 
+# 将当前进程绑定到 E 核心（能效核），避免占用 P 核影响系统稳定性
+def bind_process_to_e_cores():
+    """
+    将当前 Python 进程绑定到 Intel 混合架构的 E-cores（能效核）。
+
+    对于 13/14 代 Intel（如 13900HX），逻辑核心布局为：
+      - 0-15: P-cores（性能核，带超线程）
+      - 16-31: E-cores（能效核）
+
+    通用推断：本进程默认使用第 0 个逻辑核心所属的 CPU 组来判断，
+    取逻辑核心的后半段作为 E-cores。若失败静默跳过。
+    """
+    try:
+        import psutil
+
+        total = psutil.cpu_count(logical=True)
+        # 13900HX 等混合架构：E-cores 占逻辑核心后 16 个（16-31）
+        # 通用规则：E-cores = 逻辑核心总数的一半（后半段）
+        if total < 16:
+            return False  # 核心太少，可能不是混合架构
+
+        e_core_start = total // 2
+        e_cores = list(range(e_core_start, total))
+
+        p = psutil.Process()
+        p.cpu_affinity(e_cores)
+        logger.info(f"Bound current process to E-cores {e_cores[0]}-{e_cores[-1]}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to bind process to E-cores: {e}")
+        return False
+
+
 def get_new_version_if_available():
     remote_version = get_github_version()
     current_version = get_current_version()

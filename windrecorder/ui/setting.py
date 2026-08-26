@@ -259,6 +259,14 @@ def render():
                 _t("lb_checkbox_add_watermark"), value=config.enable_month_lightbox_watermark
             )
 
+            # 绑定到 E 核心（能效核）
+            config_bind_to_e_cores = st.checkbox(
+                "绑定后台进程到 E 核心（能效核）",
+                value=config.bind_to_e_cores,
+                help="启用后，录制进程和托盘进程会绑定到 Intel 混合架构的 E-cores 上运行，"
+                     "避免占用 P 核影响前台应用性能。需要重启程序生效。（当前仅支持 Intel 12/13/14 代）",
+            )
+
         with col2_ui:
             config_wordcloud_user_stop_words = st.text_area(
                 _t("set_input_wordcloud_filter"),
@@ -486,6 +494,7 @@ def render():
             config.set_and_save_config("enable_synonyms_recommend", config_enable_synonyms_recommend)
             config.set_and_save_config("img_embed_search_recall_result_per_db", config_img_embed_search_recall_result_per_db)
             config.set_and_save_config("enable_month_lightbox_watermark", enable_month_lightbox_watermark)
+            config.set_and_save_config("bind_to_e_cores", config_bind_to_e_cores)
             config.set_and_save_config("recycle_deleted_files", recycle_deleted_files)
 
             # 更改了一天之时缩略图相关选项时，清空缓存时间轴缩略图

@@ -324,6 +324,11 @@ def hide_cli_window():
 
 
 def main():
+    # 如果配置开启，将主进程（托盘）绑定到 E 核，避免占用 P 核影响系统稳定性
+    if config.bind_to_e_cores:
+        from windrecorder import utils as windrecorder_utils
+        windrecorder_utils.bind_process_to_e_cores()
+
     # 启动时加锁，防止重复启动
     while True:
         try:

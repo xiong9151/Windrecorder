@@ -276,6 +276,10 @@ def main():
     subprocess.run("color 60", shell=True)  # 设定背景色为不活动
     assert_ffmpeg()
 
+    # 如果配置开启，将整个录制进程绑定到 E 核，避免占用 P 核影响系统稳定性
+    if config.bind_to_e_cores:
+        utils.bind_process_to_e_cores()
+
     while True:
         try:
             recording_lock = FileLock(config.record_lock_path, str(getpid()), timeout_s=None)

@@ -128,6 +128,7 @@ class Config:
         webdav_password="",
         webdav_videos_dir="videos",
         compress_cpu_threads=None,
+        bind_to_e_cores=False,
         **other_field,
     ) -> None:
         # If need to process input parameters, they should assign another variable name to prevent recursive writing into the config.
@@ -242,6 +243,7 @@ class Config:
         self.webdav_username = webdav_username
         self.webdav_password = webdav_password
         self.webdav_videos_dir = webdav_videos_dir
+        self.bind_to_e_cores = bind_to_e_cores
 
     def set_and_save_config(self, attr: str, value):
         if not hasattr(self, attr):
