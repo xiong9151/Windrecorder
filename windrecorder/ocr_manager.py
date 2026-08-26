@@ -763,29 +763,44 @@ def compare_strings(a, b, threshold=70.0):
         return False, overlap
 
 
-# 计算两张图片的重合率 - 通过本地文件的方式
-# FIXME 这个函数太慢了，得优化
-def compare_image_similarity(img_path1, img_path2, threshold=0.85):
+# 计算两张图片的相似度 - 通过本地文件的方式
+# 使用 absdiff 替代 SSIM，开销从几百ms降至~10ms
+def compare_image_similarity(img_path1, img_path2, threshold=0.85, target_width=1280):
+    """
+    计算两张图片的相似度（0~1，越大越相似），返回 True（相似）/ False（不相似）。
+
+    使用 absdiff 像素差算法，支持整数倍缩放。
+    """
     logger.debug("Calculate the coincidence rate of two pictures.")
-    # 读取所有需要比较的图片
-    image_paths = [img_path1, img_path2]
-    images = [cv2.imread(path) for path in image_paths]
+    try:
+        img1 = cv2.imread(img_path1)
+        img2 = cv2.imread(img_path2)
+        if img1 is None or img2 is None:
+            logger.warning(f"compare_image_similarity: cannot read image {img_path1} or {img_path2}")
+            return False
 
-    # 缩小图像大小
-    scale_factor = 0.3
-    images = [cv2.resize(img, None, fx=scale_factor, fy=scale_factor) for img in images]
+        h, w = img1.shape[:2]
+        scale = max(1, w // target_width)
+        small_w, small_h = w // scale, h // scale
 
-    # 将图片转换为灰度
-    images_gray = [cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) for img in images]
+        g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        if scale > 1:
+            g1 = cv2.resize(g1, (small_w, small_h), interpolation=cv2.INTER_AREA)
+            g2 = cv2.resize(g2, (small_w, small_h), interpolation=cv2.INTER_AREA)
 
-    # 计算两张图片的SSIM
-    score = ssim(images_gray[0], images_gray[1])
+        diff = cv2.absdiff(g1, g2)
+        similarity = 1.0 - float(diff.mean()) / 255.0
+        logger.debug(f"compare_image_similarity:{similarity} (threshold={threshold})")
 
-    if score >= threshold:
-        logger.debug(f"Images are similar with score {score}, deleting {img_path2}")
-        return True
-    else:
-        logger.debug(f"Images are different with score {score}")
+        if similarity >= threshold:
+            logger.debug(f"Images are similar with score {similarity}, deleting {img_path2}")
+            return True
+        else:
+            logger.debug(f"Images are different with score {similarity}")
+            return False
+    except Exception as e:
+        logger.error(f"compare_image_similarity failed: {e}")
         return False
 
 
@@ -852,8 +867,8 @@ def ocr_core_logic(file_path, vid_file_name, iframe_path):
     crop_iframe(iframe_path)
 
     display_count = utils.get_display_count()
-    # 假设屏幕大小一致，每块屏幕需要 15% 的不同画面，与 30% 的不同文字
-    threshold_img_similarity = 1 - 0.15 / display_count
+    # iframe 图像去重的独立置信度阈值（absdiff 数值范围）
+    threshold_img_similarity = config.iframe_compare_similarity
     threshold_str_similarity = 100 - 30 / display_count
 
     img1_path_temp = ""

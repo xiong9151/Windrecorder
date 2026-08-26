@@ -98,6 +98,7 @@ class Config:
         screenshot_compare_similarity,
         ocr_compare_similarity,
         ocr_compare_similarity_in_table,
+        iframe_compare_similarity,
         foreground_window_video_background_color,
         is_record_system_sound,
         record_foreground_window_process_name,
@@ -212,6 +213,7 @@ class Config:
         self.screenshot_compare_similarity = screenshot_compare_similarity
         self.ocr_compare_similarity = ocr_compare_similarity
         self.ocr_compare_similarity_in_table = ocr_compare_similarity_in_table
+        self.iframe_compare_similarity = iframe_compare_similarity
         self.foreground_window_video_background_color = foreground_window_video_background_color
         self.is_record_system_sound = is_record_system_sound
         self.record_foreground_window_process_name = record_foreground_window_process_name
