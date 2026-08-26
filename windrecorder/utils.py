@@ -570,26 +570,25 @@ def bind_process_to_e_cores():
 
     对于 13/14 代 Intel（如 13900HX），逻辑核心布局为：
       - 0-15: P-cores（性能核，带超线程）
-      - 16-31: E-cores（能效核）
+      - 16-31: E-cores（能效核，共 16 个）
 
-    通用推断：本进程默认使用第 0 个逻辑核心所属的 CPU 组来判断，
-    取逻辑核心的后半段作为 E-cores。若失败静默跳过。
+    根据用户需求，仅绑定到最后 8 个 E 核心（24-31）。
+    这样既减轻了 P 核负担，又保留了前 8 个 E 核的灵活性。
     """
     try:
         import psutil
 
         total = psutil.cpu_count(logical=True)
-        # 13900HX 等混合架构：E-cores 占逻辑核心后 16 个（16-31）
-        # 通用规则：E-cores = 逻辑核心总数的一半（后半段）
-        if total < 16:
+        if total < 24:
             return False  # 核心太少，可能不是混合架构
 
-        e_core_start = total // 2
-        e_cores = list(range(e_core_start, total))
+        # 13900HX: 32 逻辑核心，E-cores 16-31（共 16 个）
+        # 绑定到最后 8 个 E 核心：24-31
+        e_cores = list(range(total - 8, total))
 
         p = psutil.Process()
         p.cpu_affinity(e_cores)
-        logger.info(f"Bound current process to E-cores {e_cores[0]}-{e_cores[-1]}")
+        logger.info(f"Bound current process to last 8 E-cores {e_cores[0]}-{e_cores[-1]}")
         return True
     except Exception as e:
         logger.warning(f"Failed to bind process to E-cores: {e}")
