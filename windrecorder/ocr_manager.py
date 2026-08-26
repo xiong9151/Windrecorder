@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import pandas as pd
@@ -27,6 +28,9 @@ from windrecorder.utils import dtstr_to_seconds
 from windrecorder.utils import get_text as _t
 
 logger = get_logger(__name__)
+
+# 并行裁剪线程数（crop_iframe 使用）
+DEFAULT_CROP_MAX_WORKERS = 4
 
 # if ocr engine need to be initialized
 third_party_ocr_actived_manager = {
@@ -300,120 +304,139 @@ def crop_iframe(directory):
             continue
         image_files.append(f)
 
-    # 循环处理每个图片文件
-    for file_name in image_files:
-        # 构建图片文件的完整路径
+    # 单张图片裁剪的完整逻辑，封装为独立函数以便并行
+    def _crop_single(file_name):
         file_path = os.path.join(directory, file_name)
-        if "_cropped" in file_name:
-            continue
-
-        image = Image.open(file_path)
-        draw = ImageDraw.Draw(image)
-
-        # 校验图片
         try:
-            img_width, img_height = image.size
-        except Exception:
-            logger.warning(f"crop_iframe: cannot read image {file_path}, skipping")
-            os.remove(file_path)
-            continue
-        fallback_condition = False
-        display_index = -1
-        if not config.record_single_display_index <= len(display_info):  # 当记录的显示器索引不存在于所有显示器中时，当作一个完整显示器使用默认参数处理
-            fallback_condition = True
-        elif config.multi_display_record_strategy == "single":
-            # 当图片分辨率符合其中某个显示器的完整尺寸时，对其单独处理
-            for i in display_info:  # 逐个检查显示器，是否与config index吻合
-                if (
-                    abs(display_info[config.record_single_display_index - 1]["width"] - img_width) < 2
-                    and abs(display_info[config.record_single_display_index - 1]["height"] - img_height) < 2
-                ):
-                    monitors_info_process = [display_info[config.record_single_display_index - 1]]
-                    display_index = config.record_single_display_index - 1
-                    fallback_condition = False
-                    break
-                else:
-                    fallback_condition = True
-        # 当显示器配置为录制所有显示器、但与图片不符时，执行fallback策略：当作一个显示器、使用默认涂黑范围处理
-        elif config.multi_display_record_strategy == "all" and (
-            abs(display_all_full_size["width"] - img_width) > 10 or abs(display_all_full_size["height"] - img_height) > 10
-        ):
-            fallback_condition = True
+            image = Image.open(file_path)
+            draw = ImageDraw.Draw(image)
 
-        if fallback_condition:
-            logger.info(
-                f"video iframe {file_name} not matched with current display configuration({display_info}), fallback to default mask config."
-            )
-            monitors_info_process = [display_all_full_size]
-            top_percent = [0.06]
-            bottom_percent = [0.06]
-            left_percent = [0.06]
-            right_percent = [0.03]
-        else:
-            monitors_info_process = display_info
-
-        for i, monitor in enumerate(monitors_info_process):
-            # 计算裁剪区域的像素值
+            # 校验图片
             try:
-                top = top_percent[i]
-                bottom = bottom_percent[i]
-                left = left_percent[i]
-                right = right_percent[i]
-            except IndexError:
-                top = 0.06
-                bottom = 0.06
-                left = 0.06
-                right = 0.03
+                img_width, img_height = image.size
+            except Exception:
+                logger.warning(f"crop_iframe: cannot read image {file_path}, skipping")
+                os.remove(file_path)
+                image.close()
+                return
+            fallback_condition = False
+            display_index = -1
+            if not config.record_single_display_index <= len(display_info):  # 当记录的显示器索引不存在于所有显示器中时，当作一个完整显示器使用默认参数处理
+                fallback_condition = True
+            elif config.multi_display_record_strategy == "single":
+                # 当图片分辨率符合其中某个显示器的完整尺寸时，对其单独处理
+                for i in display_info:  # 逐个检查显示器，是否与config index吻合
+                    if (
+                        abs(display_info[config.record_single_display_index - 1]["width"] - img_width) < 2
+                        and abs(display_info[config.record_single_display_index - 1]["height"] - img_height) < 2
+                    ):
+                        monitors_info_process = [display_info[config.record_single_display_index - 1]]
+                        display_index = config.record_single_display_index - 1
+                        fallback_condition = False
+                        break
+                    else:
+                        fallback_condition = True
+            # 当显示器配置为录制所有显示器、但与图片不符时，执行fallback策略：当作一个显示器、使用默认涂黑范围处理
+            elif config.multi_display_record_strategy == "all" and (
+                abs(display_all_full_size["width"] - img_width) > 10
+                or abs(display_all_full_size["height"] - img_height) > 10
+            ):
+                fallback_condition = True
 
-            # 如果仅录制单显示器，且通过了校验
-            if display_index > 0:
-                i = display_index
-                left_boundary = 0
-                top_boundary = 0
-                right_boundary = img_width
-                bottom_boundary = img_height
-            else:  # 录制所有显示器情况下
-                left_boundary = monitor["left"] - display_all_full_size["left"]
-                top_boundary = monitor["top"] - display_all_full_size["top"]
-                right_boundary = left_boundary + monitor["width"]
-                bottom_boundary = top_boundary + monitor["height"]
+            if fallback_condition:
+                logger.info(
+                    f"video iframe {file_name} not matched with current display configuration({display_info}), fallback to default mask config."
+                )
+                monitors_info_process = [display_all_full_size]
+                top_percent_used = [0.06]
+                bottom_percent_used = [0.06]
+                left_percent_used = [0.06]
+                right_percent_used = [0.03]
+            else:
+                monitors_info_process = display_info
+                top_percent_used = top_percent
+                bottom_percent_used = bottom_percent
+                left_percent_used = left_percent
+                right_percent_used = right_percent
 
-            # 计算涂黑的区域
-            top_black = (
-                left_boundary,
-                top_boundary,
-                right_boundary,
-                top_boundary + int(monitor["height"] * top),
-            )
-            bottom_black = (
-                left_boundary,
-                bottom_boundary - int(monitor["height"] * bottom),
-                right_boundary,
-                bottom_boundary,
-            )
-            left_black = (
-                left_boundary,
-                top_boundary,
-                left_boundary + int(monitor["width"] * left),
-                bottom_boundary,
-            )
-            right_black = (
-                right_boundary - int(monitor["width"] * right),
-                top_boundary,
-                right_boundary,
-                bottom_boundary,
-            )
+            for i, monitor in enumerate(monitors_info_process):
+                # 计算裁剪区域的像素值
+                try:
+                    top = top_percent_used[i]
+                    bottom = bottom_percent_used[i]
+                    left = left_percent_used[i]
+                    right = right_percent_used[i]
+                except IndexError:
+                    top = 0.06
+                    bottom = 0.06
+                    left = 0.06
+                    right = 0.03
 
-            # 在对应区域涂黑
-            draw.rectangle(top_black, fill="black")
-            draw.rectangle(bottom_black, fill="black")
-            draw.rectangle(left_black, fill="black")
-            draw.rectangle(right_black, fill="black")
+                # 如果仅录制单显示器，且通过了校验
+                if display_index > 0:
+                    i = display_index
+                    left_boundary = 0
+                    top_boundary = 0
+                    right_boundary = img_width
+                    bottom_boundary = img_height
+                else:  # 录制所有显示器情况下
+                    left_boundary = monitor["left"] - display_all_full_size["left"]
+                    top_boundary = monitor["top"] - display_all_full_size["top"]
+                    right_boundary = left_boundary + monitor["width"]
+                    bottom_boundary = top_boundary + monitor["height"]
 
-        cropped_file_path = os.path.splitext(file_path)[0] + "_cropped" + os.path.splitext(file_path)[1]
-        image.save(cropped_file_path)
+                # 计算涂黑的区域
+                top_black = (
+                    left_boundary,
+                    top_boundary,
+                    right_boundary,
+                    top_boundary + int(monitor["height"] * top),
+                )
+                bottom_black = (
+                    left_boundary,
+                    bottom_boundary - int(monitor["height"] * bottom),
+                    right_boundary,
+                    bottom_boundary,
+                )
+                left_black = (
+                    left_boundary,
+                    top_boundary,
+                    left_boundary + int(monitor["width"] * left),
+                    bottom_boundary,
+                )
+                right_black = (
+                    right_boundary - int(monitor["width"] * right),
+                    top_boundary,
+                    right_boundary,
+                    bottom_boundary,
+                )
 
-        image.close()
+                # 在对应区域涂黑
+                draw.rectangle(top_black, fill="black")
+                draw.rectangle(bottom_black, fill="black")
+                draw.rectangle(left_black, fill="black")
+                draw.rectangle(right_black, fill="black")
+
+            cropped_file_path = os.path.splitext(file_path)[0] + "_cropped" + os.path.splitext(file_path)[1]
+            image.save(cropped_file_path)
+
+            image.close()
+        except Exception as e:
+            logger.error(f"crop_iframe: failed to crop {file_name}: {e}")
+            try:
+                image.close()
+            except Exception:
+                pass
+
+    # 并行裁剪：每个文件独立，互不依赖，顺序不影响结果
+    # 使用线程池利用 E 核多核吞吐，PIL 的 Image.open/save 在并行时不阻塞
+    if len(image_files) <= 1:
+        for file_name in image_files:
+            _crop_single(file_name)
+    else:
+        with ThreadPoolExecutor(max_workers=min(4, len(image_files))) as pool:
+            pool.map(_crop_single, image_files)
+
     logger.debug(f"saved croped img in {image_files}")
 
 
