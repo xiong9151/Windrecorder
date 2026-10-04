@@ -76,6 +76,16 @@ def record_screen_via_ffmpeg(
     display_info = utils.get_display_info()
     pix_fmt_args = ["-pix_fmt", "yuv420p"]
 
+    # 解析目标分辨率配置，用于录制时缩放（如 scale=1920:1080）
+    target_resolution = config.target_screen_res
+    if target_resolution and target_resolution.startswith("scale="):
+        video_filter_args = ["-vf", target_resolution]
+    else:
+        video_filter_args = []
+
+    # gdigrab 录制时不绘制鼠标光标、不显示录制区域边框
+    captureblt_args = ["-draw_mouse", "0", "-show_region", "0"]
+
     record_range_args = []
     if config.multi_display_record_strategy == "single" and len(display_info) > 1:  # 当有多台显示器、且选择仅录制其中一台时
         record_encoder_args = _replace_value_in_args(
@@ -107,8 +117,10 @@ def record_screen_via_ffmpeg(
         "-framerate",
         f"{framerate}",
         *record_range_args,
+        *captureblt_args,
         "-i",
         "desktop",
+        *video_filter_args,
         *record_encoder_args,
         *pix_fmt_args,
         "-t",
@@ -132,9 +144,16 @@ def record_screen_via_ffmpeg(
 def is_recording():
     try:
         with open(config.record_lock_path, encoding="utf-8") as f:
-            check_pid = int(f.read())
+            content = f.read().strip()
+            if not content:
+                logger.error("record: Screen recording service file lock is empty.")
+                return False
+            check_pid = int(content)
     except FileNotFoundError:
         logger.error("record: Screen recording service file lock does not exist.")
+        return False
+    except ValueError:
+        logger.error(f"record: Screen recording service file lock contains invalid data: {repr(content)}")
         return False
 
     return utils.is_process_running(check_pid, "python.exe")
@@ -155,8 +174,23 @@ def compress_video_CLI(video_path, target_width, target_height, encoder, crf_fla
     else:
         threads_param = ""
 
+    # 检查是否需要预缩放以适应硬件编码器的分辨率限制
+    scale_filter = f"scale={target_width}:{target_height}"
+    if encoder in ["hevc_qsv", "h264_qsv"] and (target_width > 2048 or target_height > 2048):
+        # Intel QSV 编码器对某些编解码器有分辨率限制（最大 2048）
+        scale_factor = min(2048 / target_width, 2048 / target_height)
+        max_width = int(target_width * scale_factor)
+        max_height = int(target_height * scale_factor)
+        scale_filter = f"scale={max_width}:{max_height},scale={target_width}:{target_height}"
+    elif encoder in ["hevc_nvenc", "h264_nvenc"] and (target_width > 4096 or target_height > 4096):
+        # NVIDIA NVENC 对某些编解码器有分辨率限制（最大 4096）
+        scale_factor = min(4096 / target_width, 4096 / target_height)
+        max_width = int(target_width * scale_factor)
+        max_height = int(target_height * scale_factor)
+        scale_filter = f"scale={max_width}:{max_height},scale={target_width}:{target_height}"
+
     compress_cmd = (
-        f'ffmpeg -hwaccel auto -i "{video_path}" -vf scale={target_width}:{target_height} '
+        f'ffmpeg -hwaccel auto -i "{video_path}" -vf {scale_filter} '
         f'{threads_param} -c:v {encoder} {crf_flag} {crf} -preset medium -pix_fmt yuv420p -y "{output_path}"'
     )
 
