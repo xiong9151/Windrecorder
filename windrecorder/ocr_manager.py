@@ -1084,7 +1084,14 @@ def ocr_process_single_video(video_path, vid_file_name, iframe_path, optimize_fo
             f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}\n{e}")
     else:
         logger.info("Add tags to video file")
-        new_file_path = file_path.replace("-INDEX", "-OCRED")
+        # 检查是否实际有 OCR 数据写入数据库，无数据则标 -OCRED-NODATA
+        df_check = db_manager.db_get_row_from_vid_filename(vid_file_name)
+        if len(df_check) > 0:
+            new_file_path = file_path.replace("-INDEX", "-OCRED")
+            logger.info("Video has valid OCR data, using -OCRED tag")
+        else:
+            new_file_path = file_path.replace("-INDEX", "-OCRED-NODATA")
+            logger.info("Video has no valid OCR data, using -OCRED-NODATA tag")
         os.rename(file_path, new_file_path)
         logger.info(f"--------- {file_path} Finished! ---------")
     finally:
