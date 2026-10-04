@@ -1,20 +1,20 @@
 {
     "cpu_h264":{
-        "ffmpeg_cmd":["-c:v", "libx264", "-b:v", "BITRATE"]
+        "ffmpeg_cmd":["-c:v", "libx264", "-b:v", "BITRATE", "-preset", "ultrafast", "-g", "30", "-pix_fmt", "yuv420p"]
     },
     "cpu_h265":{
-        "ffmpeg_cmd":["-c:v", "libx265", "-b:v", "BITRATE"]
+        "ffmpeg_cmd":["-c:v", "libx265", "-b:v", "BITRATE", "-preset", "ultrafast", "-g", "30", "-pix_fmt", "yuv420p"]
     },
     "NVIDIA_h265":{
-        "ffmpeg_cmd":["-c:v", "hevc_nvenc", "-b:v", "BITRATE"]
+        "ffmpeg_cmd":["-c:v", "hevc_nvenc", "-b:v", "BITRATE", "-preset", "p1", "-g", "30", "-pix_fmt", "yuv420p"]
     },
     "AMD_h265":{
-        "ffmpeg_cmd":["-c:v", "hevc_amf", "-b:v", "BITRATE"]
+        "ffmpeg_cmd":["-c:v", "hevc_amf", "-b:v", "BITRATE", "-g", "30", "-pix_fmt", "yuv420p"]
     },
     "SVT-AV1":{
-        "ffmpeg_cmd":["-c:v", "libsvtav1", "-b:v", "BITRATE", "-svtav1-params", "fast-decode=1:tbr=400k:rc=1:preset=13:scm=1:lp=4:lookahead=0"]
+        "ffmpeg_cmd":["-c:v", "libsvtav1", "-b:v", "BITRATE", "-preset", "8", "-g", "30", "-pix_fmt", "yuv420p", "-svtav1-params", "fast-decode=1:tbr=400k:rc=1:preset=13:scm=1:lp=4:lookahead=0"]
     },
     "qsv265": {
-        "ffmpeg_cmd": ["-c:v", "hevc_qsv", "-b:v", "BITRATE", "-preset", "veryslow", "-global_quality", "39", "-load_plugin", "hevc_hw", "-pix_fmt", "nv12"]
+        "ffmpeg_cmd": ["-c:v", "hevc_qsv", "-b:v", "BITRATE", "-preset", "veryslow", "-global_quality", "39", "-load_plugin", "hevc_hw", "-g", "30", "-pix_fmt", "nv12"]
     }
 }
