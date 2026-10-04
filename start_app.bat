@@ -18,7 +18,11 @@ if exist "hide_CLI_by_python.txt" (
 :hide
 @REM hide CLI immediately
 if "%1"=="h" goto begin
-start mshta vbscript:createobject("wscript.shell").run("%~nx0"^&" h",0)^&(window.close) && exit /b
+@REM After Windows 11 26200+ update, mshta's inline vbscript: protocol no longer
+@REM spawns child processes. Use wscript with a temp .vbs instead (mode 0 = hidden window).
+> "%TEMP%\wr_hide.vbs" echo Set s=CreateObject("WScript.Shell"):s.Run "%~f0 h",0,FALSE
+wscript "%TEMP%\wr_hide.vbs"
+exit /b
 
 :begin
 cd /d %~dp0
