@@ -1,10 +1,8 @@
 import json
 import os
-import random
 import re
 import shutil
 import stat
-import tempfile
 import time
 from json import JSONDecodeError
 from pathlib import Path
@@ -20,6 +18,7 @@ from windrecorder.const import (
     SYSTEM_DIRS,
 )
 from windrecorder.logger import get_logger
+from windrecorder.storage import atomic_write_json
 
 logger = get_logger(__name__)
 
@@ -96,10 +95,6 @@ def find_filename_in_dir(dir, search_str):
 
 # 检查视频文件是否存在
 def check_video_exist_in_videos_dir(video_name):
-    """
-    检查视频文件在磁盘上是否存在，返回实际文件名或 None
-    如果启用了 WebDAV，也检查 WebDAV 存储
-    """
     try:
         exist_videofiles_list = os.listdir(
             os.path.join(config.record_videos_dir_ud, convert_vid_filename_as_YYYY_MM(video_name))
@@ -107,129 +102,12 @@ def check_video_exist_in_videos_dir(video_name):
         video_filename_list = utils.find_strings_list_with_substring(
             exist_videofiles_list, video_name.split(".")[0]
         )  # 获取文件夹列表中对应文件名
-        video_filename_list = [f for f in video_filename_list if f.endswith(".mp4")]
         if video_filename_list:
-            # 优先选择未被压缩的
-            uncompressed = [f for f in video_filename_list if "-COMPRESS" not in f]
-            if uncompressed:
-                return uncompressed[0]
             return video_filename_list[0]
         else:
             return None
     except FileNotFoundError:
         return None
-
-
-# 检查视频文件是否存在（磁盘 + WebDAV 回退）
-def check_video_exist_anywhere(video_name):
-    """
-    先检查本地磁盘，再检查 WebDAV（如果启用）。
-    返回 (实际文件名, 来源: "local" | "webdav" | None)
-    """
-    # 1. 检查本地磁盘
-    local_name = check_video_exist_in_videos_dir(video_name)
-    if local_name:
-        return local_name, "local"
-
-    # 2. 检查 WebDAV
-    if config.enable_webdav_video_storage:
-        try:
-            from windrecorder.webdav_utils import get_webdav_client
-
-            wd = get_webdav_client()
-            if wd:
-                remote_name = wd.check_video_exist(video_name)
-                if remote_name:
-                    return remote_name, "webdav"
-        except Exception as e:
-            logger.warning(f"WebDAV check failed: {e}")
-
-    return None, None
-
-
-# WebDAV 视频缓存目录
-WEBDAV_CACHE_DIR = "cache/webdav_cache"
-WEBDAV_CACHE_MAX_AGE = 3600  # 缓存有效期 1 小时（秒）
-
-
-def _ensure_webdav_cache_dir():
-    """确保 WebDAV 缓存目录存在"""
-    ensure_dir(WEBDAV_CACHE_DIR)
-
-
-def _webdav_cache_path(video_name):
-    """根据视频名生成缓存文件路径"""
-    safe_name = video_name.replace("/", "_").replace("\\", "_")
-    return os.path.join(WEBDAV_CACHE_DIR, safe_name)
-
-
-def _clean_stale_webdav_cache():
-    """清理所有过期的 WebDAV 缓存文件（超过 WEBDAV_CACHE_MAX_AGE 的即视为过期）"""
-    if not os.path.isdir(WEBDAV_CACHE_DIR):
-        return
-    now = time.time()
-    removed = 0
-    for fname in os.listdir(WEBDAV_CACHE_DIR):
-        fpath = os.path.join(WEBDAV_CACHE_DIR, fname)
-        if os.path.isfile(fpath) and now - os.path.getmtime(fpath) > WEBDAV_CACHE_MAX_AGE:
-            try:
-                os.remove(fpath)
-                removed += 1
-            except OSError:
-                pass
-    if removed > 0:
-        logger.debug(f"Cleaned {removed} stale WebDAV cache files")
-
-
-# 模块导入时（进程启动时），清理所有超过缓存有效期的文件
-_clean_stale_webdav_cache()
-
-
-# 获取 WebDAV 视频文件（带缓存）
-def get_webdav_video_bytes(video_name):
-    """
-    从 WebDAV 下载视频文件到本地缓存，返回 (实际文件名, 缓存文件路径) 或 (None, None)。
-    缓存文件有效期 1 小时，自动清理过期文件。使用 Python requests 在服务端完成认证。
-    """
-    from windrecorder.webdav_utils import get_webdav_client
-
-    wd = get_webdav_client()
-    if wd is None:
-        return None, None
-
-    actual_name = wd.check_video_exist(video_name)
-    if actual_name is None:
-        return None, None
-
-    _ensure_webdav_cache_dir()
-    cache_path = _webdav_cache_path(actual_name)
-
-    # 检查缓存是否有效
-    if os.path.exists(cache_path):
-        cache_age = time.time() - os.path.getmtime(cache_path)
-        if cache_age < WEBDAV_CACHE_MAX_AGE:
-            logger.debug(f"WebDAV cache hit: {cache_path} (age: {cache_age:.0f}s)")
-            return actual_name, cache_path
-        else:
-            logger.debug(f"WebDAV cache expired: {cache_path} (age: {cache_age:.0f}s)")
-            try:
-                os.remove(cache_path)
-            except OSError:
-                pass
-
-    # 下载
-    remote_path = wd.get_video_filepath(actual_name)
-    content = wd.get_file(remote_path)
-    if content and len(content) > 1024:
-        with open(cache_path, "wb") as f:
-            f.write(content)
-        logger.info(f"WebDAV cached: {cache_path} ({len(content) / 1024 / 1024:.1f} MB)")
-        # 清理过期缓存（概率性，避免每次请求都遍历）
-        if random.randint(1, 10) == 1:
-            _clean_stale_webdav_cache()
-        return actual_name, cache_path
-
-    return None, None
 
 
 # 统计文件夹大小
@@ -324,8 +202,8 @@ def get_screenshots_cache_dir_lst(directory=SCREENSHOT_CACHE_FILEPATH):
     try:
         items = os.listdir(directory)
     except FileNotFoundError:
-        # 截图缓存目录不存在（未启用截图节能模式或首次运行），返回空列表而非抛错
-        return matching_folders
+        # Startup maintenance can run before the first screenshot creates its cache.
+        return []
     for item in items:
         folder_path = os.path.join(directory, item)
         if os.path.isdir(folder_path) and re.match(pattern, item):
@@ -385,8 +263,7 @@ def read_dataframe_from_path(file_path="cache/temp.csv"):
 def save_dict_as_json_to_path(data: dict, filepath):
     """将 dict 保存到 json"""
     ensure_dir(os.path.dirname(filepath))
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(filepath, data)
     logger.info(f"files: json has been saved at {filepath}")
 
 
@@ -407,13 +284,20 @@ def read_json_as_dict_from_path(filepath):
 def get_extension(extension_filepath="extension"):
     dir_list = get_file_dir_list_first_level(extension_filepath)
     extension_dict = {}
-    for dir in dir_list:
+    for directory in dir_list:
+        if directory == "LLM_search_and_summary":
+            continue  # Retired extension, including locally retained copies.
+        metadata_path = Path(extension_filepath) / directory / "meta.json"
         try:
-            with open(f"{extension_filepath}\\{dir}\\meta.json", encoding="utf-8") as file:
+            with metadata_path.open(encoding="utf-8") as file:
                 data = json.load(file)
-                extension_dict[data["extension_name"]] = data
-        except Exception as e:
-            logger.warning(str(e))
+            if not isinstance(data, dict) or not isinstance(data.get("extension_name"), str) or not data["extension_name"].strip():
+                raise ValueError("Metadata must contain a nonempty extension_name.")
+            extension_dict[data["extension_name"]] = data
+        except FileNotFoundError:
+            continue  # Git may leave untracked caches or non-extension folders.
+        except (OSError, ValueError) as error:
+            logger.warning("Cannot read extension metadata %s: %s", metadata_path, error)
     return extension_dict
 
 
@@ -511,15 +395,10 @@ def delete_files_via_config(target_path):
             logger.info(f"move file to recycle bin: {target_path}")
             send2trash(target_path)
         else:
-            logger.info(f"delete file: {target_path} (permanent)")
-            # 直接删除
-            try:
-                if os.path.isdir(target_path):
-                    shutil.rmtree(target_path)
-                else:
-                    os.remove(target_path)
-            except Exception as e:
-                logger.warning(f"Failed to permanently delete {target_path}: {e}")
+            logger.info(f"delete file: {target_path}")
+            operation_success, operation_expection = safe_delete(target_path)
+            if not operation_success:
+                raise Exception(operation_expection)
     except Exception as e:
         try:
             logger.warning(f"operation failed: {str(e)}, trying to move to recycle bin")

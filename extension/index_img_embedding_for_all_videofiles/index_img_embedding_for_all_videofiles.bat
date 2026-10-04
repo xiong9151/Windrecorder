@@ -2,8 +2,12 @@
 echo Loading extension, please stand by.
 echo.
 
-cd /d %~dp0
-call conda activate py311
+cd /d "%~dp0"
+call "%~dp0..\..\scripts\activate_runtime.bat"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 chcp 65001
 cls
 

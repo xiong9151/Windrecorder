@@ -2,7 +2,12 @@
 echo Loading extension, please stand by.
 echo.
 
-cd /d %~dp0
+cd /d "%~dp0"
+call "%~dp0..\..\scripts\activate_runtime.bat"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 chcp 65001
 
 :start_install
@@ -12,6 +17,7 @@ echo   This guide will add WeChat OCR as the optical text recognition engine for
 echo   Third-party OCR engines may consume more system resources when recognizing.
 echo.
 echo   本向导将为捕风记录仪添加 WeChat OCR 作为光学文本识别引擎。
+
 echo   第三方 OCR 引擎运行时可能会占用更高系统资源。
 echo.
 echo   Support languages: en-US, zh-Hans, zh-Hant
@@ -37,20 +43,21 @@ goto start_install
 
 @REM -------------------------------------------------
 :install_module
-:: 激活 Anaconda 的 py311 环境
-call conda activate py311
-
-:: 安装 wechat-ocr 到 Anaconda 的 py311 环境
-pip install wechat-ocr -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-:: 克隆 wxocr-binary 仓库
-cd ..\..\ocr_lib
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\..\scripts\setup.ps1" -AddExtra wechat
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
+call "%~dp0..\..\scripts\activate_runtime.bat"
+if errorlevel 1 exit /b 1
+cd ..
+cd ..
+cd ocr_lib
 git clone https://github.com/Antonoko/wxocr-binary
-
-:: 返回原目录
-cd ..\extension\install_wechat_ocr
-
-goto finish
+cd ..
+cd extension
+cd install_wechat_ocr
+goto :finish
 
 
 @REM -------------------------------------------------
@@ -58,10 +65,7 @@ goto finish
 echo.
 echo   checking the installation results... 检查安装结果……
 echo.
-
-:: 使用 Anaconda 的 py311 环境运行测试脚本
 python _test_install.py
-
 echo.
 echo   The installation script has been completed. 已执行完安装脚本。
 echo.

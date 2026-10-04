@@ -4,6 +4,8 @@ import random
 import shutil
 import subprocess
 import time
+from contextlib import ExitStack
+from pathlib import Path
 
 import cv2
 import mss
@@ -13,6 +15,7 @@ import pygetwindow
 from PIL import Image, ImageDraw
 
 from windrecorder import file_utils, utils
+from windrecorder.capture import FrameChangeDetector, cache_maintenance_lock
 from windrecorder.config import (
     CONFIG_RECORD_PRESET,
     CONFIG_VIDEO_COMPRESS_PRESET,
@@ -30,9 +33,9 @@ from windrecorder.const import (
     SCREENSHOT_CACHE_FILEPATH_TMP_DB_NAME,
 )
 from windrecorder.db_manager import db_manager
+from windrecorder.lock import FileLock
 from windrecorder.logger import get_logger
 from windrecorder.ocr_manager import (
-    compare_image_similarity_np,
     compare_strings,
     ocr_image,
 )
@@ -66,8 +69,6 @@ def record_screen_via_ffmpeg(
         for i in range(len(lst)):
             if lst[i] == "CRF_NUM":
                 lst[i] = f"{config.record_crf}"
-            elif lst[i] == "FRAMERATE":
-                lst[i] = f"{framerate}"
             elif lst[i] == "BITRATE":
                 lst[i] = f"{bitrate_displays_factor}k"
         return lst
@@ -77,6 +78,9 @@ def record_screen_via_ffmpeg(
 
     record_range_args = []
     if config.multi_display_record_strategy == "single" and len(display_info) > 1:  # 当有多台显示器、且选择仅录制其中一台时
+        record_encoder_args = _replace_value_in_args(
+            CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], config.record_bitrate
+        )
         if config.record_single_display_index > len(display_info):
             logger.warning("display index not detected, reset record_single_display_index to default index 1")
             config.set_and_save_config("record_single_display_index", 1)
@@ -89,23 +93,11 @@ def record_screen_via_ffmpeg(
                 "-offset_y",
                 f"{display_info[config.record_single_display_index]['top']}",
             ]
-        record_encoder_args = _replace_value_in_args(
-            CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], config.record_bitrate
-        )
     else:
         record_encoder_args = _replace_value_in_args(
             CONFIG_RECORD_PRESET[encoder_preset_name]["ffmpeg_cmd"], int(config.record_bitrate) * (len(display_info) - 1)
         )
 
-    captureblt_args = ["-draw_mouse", "0", "-show_region", "0"]
-    
-    # 解析目标分辨率配置
-    target_resolution = config.target_screen_res  # 格式如 "scale=1920:1080"
-    if target_resolution and target_resolution.startswith("scale="):
-        video_filter_args = ["-vf", target_resolution]
-    else:
-        video_filter_args = []
-    
     ffmpeg_cmd = [
         config.ffmpeg_path,
         "-hwaccel",
@@ -115,10 +107,8 @@ def record_screen_via_ffmpeg(
         "-framerate",
         f"{framerate}",
         *record_range_args,
-        *captureblt_args,
         "-i",
         "desktop",
-        *video_filter_args,
         *record_encoder_args,
         *pix_fmt_args,
         "-t",
@@ -126,7 +116,7 @@ def record_screen_via_ffmpeg(
         out_path,
     ]
 
-        # 执行命令
+    # 执行命令
     try:
         logger.info(f"record_screen: ffmpeg cmd: {ffmpeg_cmd}")
         # 运行ffmpeg
@@ -142,16 +132,9 @@ def record_screen_via_ffmpeg(
 def is_recording():
     try:
         with open(config.record_lock_path, encoding="utf-8") as f:
-            content = f.read().strip()
-            if not content:
-                logger.error("record: Screen recording service file lock is empty.")
-                return False
-            check_pid = int(content)
+            check_pid = int(f.read())
     except FileNotFoundError:
         logger.error("record: Screen recording service file lock does not exist.")
-        return False
-    except ValueError:
-        logger.error(f"record: Screen recording service file lock contains invalid data: {repr(content)}")
         return False
 
     return utils.is_process_running(check_pid, "python.exe")
@@ -172,28 +155,8 @@ def compress_video_CLI(video_path, target_width, target_height, encoder, crf_fla
     else:
         threads_param = ""
 
-    # 检查是否需要预缩放以适应硬件编码器的限制
-    scale_filter = f"scale={target_width}:{target_height}"
-    max_width = target_width
-    max_height = target_height
-    
-    # 对于特定硬件编码器，如果目标分辨率超过限制，则先进行预缩放
-    if encoder in ["hevc_qsv", "h264_qsv"] and (target_width > 2048 or target_height > 2048):
-        # Intel QSV编码器对某些编解码器有分辨率限制(最大2048)
-        scale_factor = min(2048 / target_width, 2048 / target_height)
-        max_width = int(target_width * scale_factor)
-        max_height = int(target_height * scale_factor)
-        # 先使用scale过滤器调整到合适尺寸，再进行最终缩放
-        scale_filter = f"scale={max_width}:{max_height},scale={target_width}:{target_height}"
-    elif encoder in ["hevc_nvenc", "h264_nvenc"] and (target_width > 4096 or target_height > 4096):
-        # NVIDIA NVENC对某些编解码器有分辨率限制(最大4096)
-        scale_factor = min(4096 / target_width, 4096 / target_height)
-        max_width = int(target_width * scale_factor)
-        max_height = int(target_height * scale_factor)
-        scale_filter = f"scale={max_width}:{max_height},scale={target_width}:{target_height}"
-
     compress_cmd = (
-        f'ffmpeg -hwaccel auto -i "{video_path}" -vf {scale_filter} '
+        f'ffmpeg -hwaccel auto -i "{video_path}" -vf scale={target_width}:{target_height} '
         f'{threads_param} -c:v {encoder} {crf_flag} {crf} -preset medium -pix_fmt yuv420p -y "{output_path}"'
     )
 
@@ -266,10 +229,10 @@ def compress_video_resolution(video_path, scale_factor, custom_output_name=None)
         if os.stat(output_path).st_size < 1024:
             logger.warning("Parameter not supported, fallback to default setting.")
             file_utils.delete_files_via_config(output_path)  # 清理空文件
-            output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=cpu_threads)
+            output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=2)
     else:
         logger.warning("Parameter not supported, fallback to default setting.")
-        output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=cpu_threads)
+        output_path = encode_video(encoder=encoder_default, crf_flag=crf_flag_default, crf=crf_default, cpu_threads=2)
 
     return output_path
 
@@ -322,7 +285,7 @@ def encode_preset_benchmark_test(scale_factor, crf, cpu_threads=None):
     # 准备测试环境
     test_env_folder = "cache\\encode_preset_benchmark_test"
     if os.path.exists(test_env_folder):
-        file_utils.delete_files_via_config(test_env_folder)  # 使用统一删除方法
+        shutil.rmtree(test_env_folder)
     os.makedirs(test_env_folder)
 
     # 执行测试压缩
@@ -395,7 +358,7 @@ def encode_preset_benchmark_test(scale_factor, crf, cpu_threads=None):
 def record_encode_preset_benchmark_test():
     test_env_folder = "cache\\record_preset_benchmark_test"
     if os.path.exists(test_env_folder):
-        file_utils.delete_files_via_config(test_env_folder)  # 使用统一删除方法
+        shutil.rmtree(test_env_folder)
     os.makedirs(test_env_folder)
 
     df_result = pd.DataFrame(columns=["encoder preset", "support"])
@@ -427,6 +390,11 @@ def record_encode_preset_benchmark_test():
 
 
 def record_screen_via_screenshot_process():
+    with ExitStack() as resources:
+        return _record_screen_via_screenshot_process(resources)
+
+
+def _record_screen_via_screenshot_process(resources):
     """流程：持续地截图录制"""
 
     def _crop_ocr_image(image_filepath):
@@ -472,7 +440,7 @@ def record_screen_via_screenshot_process():
         return screenshot_cropped_saved_filepath
 
     time_counter = 0
-    screenshot_previous = None
+    detector = FrameChangeDetector()
     ocr_res_previous = ""
     start_record = False
     saved_dir_name = None
@@ -481,23 +449,24 @@ def record_screen_via_screenshot_process():
     screen_lock_interrupt_timeout = 3
     tmp_db_json = {"data": []}
     tmp_db_json_all_files = {"data": []}
-    last_execute_time = time.time()
+    last_execute_time = time.monotonic()
+    segment_started = last_execute_time
     screenshot_interrupt_recording_counter = 0
 
     logger.info(f"start new screenshot record: {config.record_seconds=}, {config.screenshot_interval_second}")
     logger.debug(f"{config.record_seconds=}")
-    while time_counter < config.record_seconds:
-        sleep_time_second = config.screenshot_interval_second - (time.time() - last_execute_time)
+    while time.monotonic() - segment_started < config.record_seconds:
+        sleep_time_second = config.screenshot_interval_second - (time.monotonic() - last_execute_time)
         if sleep_time_second < 1:
             sleep_time_second = 1
         time.sleep(sleep_time_second)
-        time_counter += config.screenshot_interval_second
+        time_counter = time.monotonic() - segment_started
         logger.debug(f"{time_counter=}, {sleep_time_second=}, {screenshot_interrupt_recording_counter=}")
 
         if screenshot_interrupt_recording_counter > config.screenshot_interrupt_recording_count and start_record:
             break
 
-        last_execute_time = time.time()
+        last_execute_time = time.monotonic()
         win_title = get_current_wintitle()
         datetime_str_record = datetime.datetime.now().strftime(DATETIME_FORMAT)
         datetime_unix_timestamp_record = utils.dtstr_to_seconds(
@@ -509,15 +478,13 @@ def record_screen_via_screenshot_process():
         if utils.is_screen_locked():
             screen_lock_interrupt_counter += 1
             logger.info(f"screen locked, {screen_lock_interrupt_counter=}")
+            if screen_lock_interrupt_counter >= screen_lock_interrupt_timeout:
+                break
             continue
         if not utils.is_system_awake():
             logger.info("system sleep, recording break")
             break
-        if screen_lock_interrupt_counter > screen_lock_interrupt_timeout:
-            logger.info(
-                f"screen locked {screen_lock_interrupt_counter=} longer than timeout {screen_lock_interrupt_timeout=}, recording stopped"
-            )
-            break
+        screen_lock_interrupt_counter = 0
 
         # skip custom rule
         if utils.is_str_contain_list_word(win_title, config.exclude_words):
@@ -546,31 +513,28 @@ def record_screen_via_screenshot_process():
             logger.error(f"capture screenshot error: {e}")
             continue
 
-        # compare screenshots similarity
-        if screenshot_previous is not None:
-            try:
-                img_similarity = compare_image_similarity_np(np.array(screenshot_previous), np.array(screenshot_current))
-                if img_similarity > config.screenshot_compare_similarity:
-                    logger.debug(f"img_similarity {img_similarity} higher than config, continue")
-                    screenshot_interrupt_recording_counter += 1
-                    continue
-            except Exception as e:
-                logger.error(
-                    f"compare img_similarity fail:{e}, {np.array(screenshot_previous).shape=}, {np.array(screenshot_previous).dtype=}, {np.array(screenshot_current).shape=}, {np.array(screenshot_current).dtype=}"
-                )
+        # Compare each new frame once; only accepted OCR advances the baseline.
+        if screenshot_current is None:
+            continue
+        try:
+            img_similarity = detector.compare(np.asarray(screenshot_current))
+            if img_similarity > config.screenshot_compare_similarity:
+                screenshot_interrupt_recording_counter += 1
                 continue
-            logger.debug(f"img_similarity {img_similarity} lower than config")
-
-        if str(np.array(screenshot_current).dtype) == "uint8":
-            screenshot_previous = screenshot_current
+        except Exception:
+            logger.exception("Could not compare screenshot")
+            continue
 
         # start record init
         if not start_record:
             # init behavior
-            time_counter = 0  # reset time counter for a full video recording
-            saved_dir_name = datetime.datetime.now().strftime(DATETIME_FORMAT)
+            segment_started = time.monotonic()
+            saved_dir_name = datetime_str_record
             saved_dir_filepath = os.path.join(SCREENSHOT_CACHE_FILEPATH, saved_dir_name)
             file_utils.ensure_dir(saved_dir_filepath)
+            resources.enter_context(
+                FileLock(os.path.join(saved_dir_filepath, ".capture.lock"), str(os.getpid()), timeout_s=None)
+            )
             tmp_json_db_filepath = os.path.join(
                 SCREENSHOT_CACHE_FILEPATH, saved_dir_name, SCREENSHOT_CACHE_FILEPATH_TMP_DB_NAME
             )
@@ -594,10 +558,15 @@ def record_screen_via_screenshot_process():
         logger.info(f"saved screenshot to {screenshot_saved_filepath}")
 
         # compare OCR result similarity
-        ocr_res_current = ocr_image(screenshot_cropped_saved_filepath)
+        try:
+            ocr_res_current = ocr_image(screenshot_cropped_saved_filepath)
+        except Exception:
+            logger.exception("OCR failed; retained screenshot and will retry the frame")
+            continue
         logger.debug(f"{ocr_res_current=}")
         if ocr_res_current is None:
             continue
+        detector.accept()
         if len(ocr_res_current) < 5:
             continue
         is_ocr_res_over_threshold_similarity, _ = compare_strings(
@@ -609,15 +578,12 @@ def record_screen_via_screenshot_process():
             continue
 
         # OCR index cache store
-        if config.index_reduce_same_content_at_different_time:
-            # deduplication res before
-            for v in tmp_db_json["data"]:
-                is_ocr_res_over_threshold_similarity, _ = compare_strings(
-                    v["ocr_text"], ocr_res_current, threshold=config.ocr_compare_similarity_in_table * 100
-                )
-                if is_ocr_res_over_threshold_similarity:
-                    screenshot_interrupt_recording_counter += 1
-                    continue
+        if config.index_reduce_same_content_at_different_time and any(
+            compare_strings(v["ocr_text"], ocr_res_current, threshold=config.ocr_compare_similarity_in_table * 100)[0]
+            for v in tmp_db_json["data"]
+        ):
+            screenshot_interrupt_recording_counter += 1
+            continue
 
         # presistent data
         logger.info("ocr res writing")
@@ -643,36 +609,30 @@ def record_screen_via_screenshot_process():
     return saved_dir_filepath
 
 
-def submit_data_to_sqlite_db_process(saved_dir_filepath):
-    """流程：将已索引的 tmp json 提交到 sqlite db"""
-    logger.info(f"submitting {saved_dir_filepath} to db")
+def is_screenshot_cache_active(folder):
+    marker = Path(folder) / ".capture.lock"
     try:
-        # verification data
-        tmp_db_json = file_utils.read_json_as_dict_from_path(
-            os.path.join(saved_dir_filepath, SCREENSHOT_CACHE_FILEPATH_TMP_DB_NAME)
-        )
-        if tmp_db_json is None:
-            logger.info("tmp_db_json is None")
-            return None
-        if len(tmp_db_json["data"]) < 5:
-            logger.info("tmp_db_json records not enough")
-            try:
-                if len(file_utils.get_file_path_list(saved_dir_filepath)) < 10:
-                    file_utils.delete_files_via_config(saved_dir_filepath)
-                else:
-                    os.rename(saved_dir_filepath, saved_dir_filepath + "-DISCARD")
-            except Exception as e:
-                logger.error(f"discard incomplete cache fail: {e}")
-            return None
-        # convert tmp_db_json to dataframe
-        dataframe_all = pd.DataFrame(columns=DATAFRAME_COLUMN_NAMES)
-        for v in tmp_db_json["data"]:
-            # deep linking update
-            _deep_linking = ""
-            if "deep_linking" in v.keys():
-                _deep_linking = v["deep_linking"]
+        pid = int(marker.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (ValueError, OSError):
+        return True  # An incomplete lock must never authorize deletion/conversion.
+    return any(utils.is_process_running(pid, compare_process_name=name) for name in ("python.exe", "pythonw.exe"))
 
-            dataframe_all.loc[len(dataframe_all.index)] = [
+
+def submit_data_to_sqlite_db_process(saved_dir_filepath):
+    """Commit recoverable capture rows; retries keep existing rowids unchanged."""
+    if saved_dir_filepath is None:
+        return False
+    folder = Path(saved_dir_filepath)
+    if (folder / "-SUBMIT").exists():
+        return True
+    try:
+        data = file_utils.read_json_as_dict_from_path(folder / SCREENSHOT_CACHE_FILEPATH_TMP_DB_NAME)
+        if not data or not data.get("data"):
+            return False
+        rows = [
+            [
                 v["vid_file_name"],
                 v["img_file_name"],
                 v["videofile_time"],
@@ -681,20 +641,37 @@ def submit_data_to_sqlite_db_process(saved_dir_filepath):
                 False,
                 v["thumbnail"],
                 v["win_title"],
-                _deep_linking,
+                v.get("deep_linking", ""),
             ]
-        db_manager.db_add_dataframe_to_db_process(dataframe_all)
-        os.makedirs(os.path.join(saved_dir_filepath, "-SUBMIT"), exist_ok=True)
-    except Exception as e:
-        logger.error(f"submitting to db fail: {e}")
+            for v in data["data"]
+        ]
+        db_manager.db_add_dataframe_to_db_process(pd.DataFrame(rows, columns=DATAFRAME_COLUMN_NAMES), deduplicate=True)
+        (folder / "-SUBMIT").mkdir(exist_ok=True)
+        return True
+    except Exception:
+        logger.exception("Capture submission failed; retained cache for retry: %s", saved_dir_filepath)
+        return False
 
 
 def convert_screenshots_dir_into_video_process(saved_dir_filepath):
+    if saved_dir_filepath is None:
+        return None
+    with cache_maintenance_lock(Path(saved_dir_filepath).parent) as acquired:
+        if acquired:
+            return _convert_screenshots_dir_into_video_process(saved_dir_filepath)
+    return None  # Keep the cache for the next maintenance pass.
+
+
+def _convert_screenshots_dir_into_video_process(saved_dir_filepath):
     """流程：将缓存的截图文件夹转换为视频"""
     try:
+        if saved_dir_filepath is not None and is_screenshot_cache_active(saved_dir_filepath):
+            return saved_dir_filepath
         if saved_dir_filepath is None:
             logger.error("saved_dir_filepath is None")
             return
+        if not (Path(saved_dir_filepath) / "-SUBMIT").exists():
+            return saved_dir_filepath  # Recover the OCR index before moving its images.
         output_video_filepath, is_garbage_data_should_be_clean = make_screenshots_into_video_via_dir_path(saved_dir_filepath)
         if output_video_filepath:
             output_video_filepath_compress = compress_video_resolution(
@@ -702,8 +679,10 @@ def convert_screenshots_dir_into_video_process(saved_dir_filepath):
                 1,
                 custom_output_name=os.path.basename(output_video_filepath).replace("-NOTCOMPRESS", ""),
             )
-            if os.path.exists(output_video_filepath_compress):
-                file_utils.delete_files_via_config(output_video_filepath)
+            if not os.path.exists(output_video_filepath_compress) or os.path.getsize(output_video_filepath_compress) < 1024:
+                logger.error("Compressed video is missing or incomplete; retaining screenshots")
+                return saved_dir_filepath
+            file_utils.delete_files_via_config(output_video_filepath)
             os.rename(saved_dir_filepath, saved_dir_filepath + "-VIDEO")
             return saved_dir_filepath + "-VIDEO"
         if is_garbage_data_should_be_clean:
@@ -717,54 +696,50 @@ def convert_screenshots_dir_into_video_process(saved_dir_filepath):
 def index_cache_screenshots_dir_process():
     """流程：索引所有未转换为视频、未提交到数据库的文件夹截图"""
 
-    def _len_db_all_json_data(dir_path):
-        tmp_db_json_filepath = os.path.join(dir_path, SCREENSHOT_CACHE_FILEPATH_TMP_DB_ALL_FILES_NAME)
-        tmp_db_json_datalist = file_utils.read_json_as_dict_from_path(tmp_db_json_filepath)
-        if tmp_db_json_datalist is None:
-            return 0
-        if "data" not in tmp_db_json_datalist.keys():
-            return 0
-        tmp_db_json_datalist = tmp_db_json_datalist["data"]
-        return len(tmp_db_json_datalist)
-
     dir_lst = file_utils.get_screenshots_cache_dir_lst()
     for dir_path in dir_lst:
+        if is_screenshot_cache_active(dir_path):
+            continue
         if not os.path.exists(os.path.join(dir_path, "-SUBMIT")) and "-DISCARD" not in dir_path:
             logger.info(f"{dir_path} not submit to db, submiting...")
             submit_data_to_sqlite_db_process(dir_path)
         if "-VIDEO" not in dir_path and os.path.exists(os.path.join(dir_path, "-SUBMIT")):
             logger.info(f"{dir_path} not convert to video, converting...")
             convert_screenshots_dir_into_video_process(dir_path)
-        elif (
-            _len_db_all_json_data(dir_path) < MINIMUM_NUMBER_OF_IMAGES_REQUIRED_FOR_A_VIDEO
-            or len(file_utils.get_file_path_list_first_level(dir_path)) < MINIMUM_NUMBER_OF_IMAGES_REQUIRED_FOR_A_VIDEO + 2
-        ):
-            logger.info(f"{dir_path} not enough data, marked as DISCARD.")
-            os.rename(dir_path, dir_path + "-DISCARD")
 
 
 def clean_cache_screenshots_dir_process():
+    if not Path(SCREENSHOT_CACHE_FILEPATH).exists():
+        return
+    with cache_maintenance_lock(SCREENSHOT_CACHE_FILEPATH) as acquired:
+        if acquired:
+            _clean_cache_screenshots_dir_process()
+
+
+def _clean_cache_screenshots_dir_process():
     """流程：清理已转换为视频、已经完成图像嵌入的文件夹（若安装开启了图像嵌入），超出存储日期范围的文件夹（区分开启与无开启图像嵌入）"""
     outdate_day = OUTDATE_DAY_TO_DELETE_SCREENSHOTS_CACHE_CONVERTED_TO_VID
     if config.enable_img_embed_search and config.img_embed_module_install:
         outdate_day = OUTDATE_DAY_TO_DELETE_SCREENSHOTS_CACHE_CONVERTED_TO_VID_WITHOUT_IMGEMB
     dir_lst = file_utils.get_screenshots_cache_dir_lst()
-    video_lst = file_utils.get_file_path_list(config.record_videos_dir_ud)
+    # A failed encoder may leave a tiny or intermediate file; it is not a backup.
+    video_lst = [
+        path
+        for path in file_utils.get_file_path_list(config.record_videos_dir_ud)
+        if path.lower().endswith(".mp4") and "-NOTCOMPRESS" not in path and os.path.getsize(path) >= 1024
+    ]
     for dir_path in dir_lst:
+        if is_screenshot_cache_active(dir_path) or not (Path(dir_path) / "-SUBMIT").exists():
+            continue
         if "-VIDEO" in dir_path and "-IMGEMB" in dir_path:
             file_utils.delete_files_via_config(dir_path)
-            logger.info(f"Directly deleted (VIDEO+IMGEMB): {dir_path}")
         elif "-VIDEO" in dir_path or any(os.path.basename(dir_path)[:19] in word for word in video_lst):
             if datetime.datetime.now() - utils.dtstr_to_datetime(os.path.basename(dir_path)[:19]) > datetime.timedelta(
                 days=outdate_day
             ):
                 file_utils.delete_files_via_config(dir_path)
-        elif not os.path.exists(os.path.join(dir_path, SCREENSHOT_CACHE_FILEPATH_TMP_DB_ALL_FILES_NAME)):
-            file_utils.delete_files_via_config(dir_path)
-            logger.info(f"Directly deleted (missing DB): {dir_path}")
         elif "-DISCARD" in dir_path:
             file_utils.delete_files_via_config(dir_path)
-            logger.info(f"Directly deleted (DISCARD): {dir_path}")
 
 
 def get_screenshot_foreground_window():
@@ -845,29 +820,23 @@ def convert_screenshots_dir_into_same_size_to_cache(
     logger.debug("uniform screenshots size...")
     # 查找最大的图片尺寸
     max_width, max_height = 0, 0
-    image_files = []
     for img_name in os.listdir(src_folder):
         if not img_name.lower().endswith((".png", ".jpg", ".jpeg")) or "_cropped" in img_name or "_error" in img_name:
             continue
-        image_files.append(img_name)
         img_path = os.path.join(src_folder, img_name)
         with Image.open(img_path) as img:
             width, height = img.size
             max_width, max_height = max(max_width, width), max(max_height, height)
 
     # 调整图片大小并保存
-    total_files = len(image_files)
-    for i, img_name in enumerate(image_files):
-        if i % 10 == 0:  # 每处理10张图片显示一次进度
-            logger.debug(f"Processing image resizing: {i}/{total_files}")
-            
+    for img_name in os.listdir(src_folder):
+        if not img_name.lower().endswith((".png", ".jpg", ".jpeg")) or "_cropped" in img_name or "_error" in img_name:
+            continue
         img_path = os.path.join(src_folder, img_name)
         logger.debug(f"process screenshots size: {img_path}")
         try:
             with Image.open(img_path) as img:
                 width, height = img.size
-                if width == max_width and height == max_height:
-                    continue  # 尺寸已经匹配，无需调整
                 new_img = Image.new("RGB", (max_width, max_height), color=canvas_color)
                 x = (max_width - width) // 2
                 y = (max_height - height) // 2
@@ -914,37 +883,26 @@ def make_screenshots_into_video_via_dir_path(saved_dir_filepath):
     def create_video_from_images(tmp_db_json_datalist, output_video):
         logger.info(f"converting screenshots into video {output_video}...")
         pic_timestamp_mapping = calc_screenshot_time_to_video_time(tmp_db_json_datalist)
-        
-        total_frames = len(pic_timestamp_mapping)
-        logger.info(f"Total frames to process: {total_frames}")
 
         # 假定所有图片大小相同，获取第一张图片的尺寸来设置视频的分辨率
         frame = cv2.imread(pic_timestamp_mapping[0]["screenshot_saved_filepath"])
-        if frame is None:
-            logger.error(f"Failed to read first frame: {pic_timestamp_mapping[0]['screenshot_saved_filepath']}")
-            raise ValueError("Cannot read first frame")
-            
         height, width, layers = frame.shape
         video = cv2.VideoWriter(output_video, cv2.VideoWriter_fourcc(*"mp4v"), 1, (width, height))
-
-        prev_time = 0
-        for v in pic_timestamp_mapping:
-            seconds = v["timestamp"]
-            duration = seconds - prev_time
-            prev_time = seconds
-
-            logger.debug(f"writing frame: {v['screenshot_saved_filepath']}, {duration=}")
-            frame = cv2.imread(v["screenshot_saved_filepath"])
-            if frame is None:
-                logger.warning(f"Failed to read frame: {v['screenshot_saved_filepath']}")
-                continue
-                
-            for j in range(duration):  # 根据持续时间重复帧
-                video.write(frame)
-
-        cv2.destroyAllWindows()
-        video.release()
-        logger.info("Video creation completed.")
+        try:
+            if not video.isOpened():
+                raise RuntimeError("Could not open the screenshot video encoder")
+            # A frame is visible until the next capture, not before its timestamp.
+            for current, following in zip(pic_timestamp_mapping, pic_timestamp_mapping[1:]):
+                duration = following["timestamp"] - current["timestamp"]
+                if duration <= 0:
+                    continue
+                frame = cv2.imread(current["screenshot_saved_filepath"])
+                if frame is None:
+                    raise ValueError(f"Unreadable screenshot: {current['screenshot_saved_filepath']}")
+                for _ in range(duration):
+                    video.write(frame)
+        finally:
+            video.release()
 
     # main
     # read temp database
@@ -955,14 +913,14 @@ def make_screenshots_into_video_via_dir_path(saved_dir_filepath):
     tmp_db_json_datalist = file_utils.read_json_as_dict_from_path(tmp_db_json_filepath)
     if tmp_db_json_datalist is None:
         logger.info(f"{tmp_db_json_filepath} not have data")
-        return None, True
+        return None, False
     if "data" not in tmp_db_json_datalist.keys():
         logger.info(f"{tmp_db_json_filepath} not have data")
-        return None, True
+        return None, False
     tmp_db_json_datalist = tmp_db_json_datalist["data"]
     if len(tmp_db_json_datalist) < MINIMUM_NUMBER_OF_IMAGES_REQUIRED_FOR_A_VIDEO:
-        logger.info(f"{tmp_db_json_filepath} not have enough data")
-        return None, True
+        logger.info(f"{tmp_db_json_filepath} not have enough data; retaining screenshots")
+        return None, False
     output_video_filepath = os.path.join(
         config.record_videos_dir_ud,
         utils.dtstr_to_datetime(tmp_db_json_datalist[0]["vid_file_name"].replace(".mp4", "")).strftime(DATE_FORMAT),
@@ -992,167 +950,3 @@ def try_empty_cache_dir_in_idle_routine():
             file_utils.empty_directory("cache")
     except Exception as e:
         logger.warning(f"empty cache dir fail: {e}")
-
-
-def try_clean_iframe_dir_in_idle_routine():
-    """
-    在空闲时清理已经不需要的 iframe 临时图片目录。
-
-    当启用图像嵌入时，OCR 不清理 iframe（留给嵌入流程用）。
-    但如果嵌入流程被中断或跳过，iframe 目录会堆积。
-    此函数清理那些不再需要的目录：
-      - 视频已标记 -OCRED-NODATA（无文字，嵌入直接跳过）
-      - 视频已标记 -OCRED-IMGEMB（嵌入已完成）
-      - 视频已标记 -SCREENSHOTS-OCRED-IMGEMB（截图模式，嵌入已完成）
-      - 对应的视频文件已不存在
-    """
-    iframe_dir = config.iframe_dir
-    if not os.path.isdir(iframe_dir):
-        return
-
-    now = time.time()
-    cleaned = 0
-
-    for dir_name in os.listdir(iframe_dir):
-        dir_path = os.path.join(iframe_dir, dir_name)
-        if not os.path.isdir(dir_path):
-            continue
-
-        should_delete = False
-
-        # 策略 1：检查对应的视频文件是否已标记嵌入完成
-        # 视频文件存储在 userdata/videos/YYYY-MM/ 下
-        dir_age = now - os.path.getmtime(dir_path)
-        yyyy_mm = dir_name[:7] if len(dir_name) >= 7 else ""
-        video_dir = os.path.join(config.record_videos_dir_ud, yyyy_mm) if yyyy_mm else None
-
-        if video_dir and os.path.isdir(video_dir):
-            matched_videos = [
-                f for f in os.listdir(video_dir)
-                if f.startswith(dir_name) and f.endswith(".mp4")
-            ]
-            for v in matched_videos:
-                # 嵌入已完成或不需要嵌入
-                if "-IMGEMB" in v or "-NODATA" in v:
-                    should_delete = True
-                    break
-                # 视频已损坏或被跳过
-                if "-ERROR" in v:
-                    should_delete = True
-                    break
-        else:
-            # 对应的月份目录不存在，说明视频早已被删除
-            if dir_age > 3600:  # 至少 1 小时后才删除，避免竞态
-                should_delete = True
-
-        if should_delete:
-            try:
-                shutil.rmtree(dir_path)
-                cleaned += 1
-                logger.debug(f"Cleaned orphan iframe dir: {dir_name}")
-            except Exception as e:
-                logger.warning(f"Failed to clean iframe dir {dir_name}: {e}")
-
-    if cleaned > 0:
-        logger.info(f"Cleaned {cleaned} orphan iframe directories")
-        
-# 录制时的编码器预设参数备选列表，按照设备兼容性优先级排序
-# - preset: 编码器预设名称，用于匹配配置文件中的record_encoder
-# - ffmpeg_cmd: FFmpeg录制命令参数列表，使用占位符在实际使用时替换
-# - available: 是否可用（通过编码器支持测试后更新）
-CONFIG_RECORD_PRESET = {
-    # CPU编码器 - 关键帧间隔为30帧（15秒@2fps）
-    "cpu_h264": {
-        "preset": "cpu_h264",
-        "ffmpeg_cmd": [
-            "-c:v",
-            "libx264",
-            "-crf",
-            "CRF_NUM",
-            "-r",
-            "FRAMERATE",
-            "-preset",
-            "ultrafast",
-            "-g",
-            "30",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-        "available": True,
-    },
-    "cpu_h265": {
-        "preset": "cpu_h265",
-        "ffmpeg_cmd": [
-            "-c:v",
-            "libx265",
-            "-crf",
-            "CRF_NUM",
-            "-r",
-            "FRAMERATE",
-            "-preset",
-            "ultrafast",
-            "-g",
-            "30",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-        "available": True,
-    },
-    # Intel核显编码器 - 关键帧间隔为30帧（15秒@2fps）
-    "qsv265": {
-        "preset": "qsv265",
-        "ffmpeg_cmd": [
-            "-c:v",
-            "hevc_qsv",
-            "-global_quality",
-            "CRF_NUM",
-            "-r",
-            "FRAMERATE",
-            "-preset",
-            "veryslow",
-            "-g",
-            "30",
-            "-pix_fmt",
-            "nv12",
-        ],
-        "available": True,
-    },
-    # NVIDIA显卡编码器 - 关键帧间隔为30帧（15秒@2fps）
-    "NVIDIA_h265": {
-        "preset": "NVIDIA_h265",
-        "ffmpeg_cmd": [
-            "-c:v",
-            "hevc_nvenc",
-            "-cq",
-            "CRF_NUM",
-            "-r",
-            "FRAMERATE",
-            "-preset",
-            "p1",
-            "-g",
-            "30",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-        "available": True,
-    },
-    # AV1编码器 - 关键帧间隔为30帧（15秒@2fps）
-    "SVT-AV1": {
-        "preset": "SVT-AV1",
-        "ffmpeg_cmd": [
-            "-c:v",
-            "libsvtav1",
-            "-crf",
-            "CRF_NUM",
-            "-r",
-            "FRAMERATE",
-            "-preset",
-            "8",
-            "-g",
-            "30",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-        "available": True,
-    },
-}

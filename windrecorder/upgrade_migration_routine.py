@@ -1,14 +1,43 @@
 # 本脚本用于在用户升级后，清理更改早期版本的旧设定
 import os
 import shutil
-
-from send2trash import send2trash
+from pathlib import Path
 
 from windrecorder import file_utils, utils
 from windrecorder.config import config
+from windrecorder.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def cleanup_retired_extension_cache(extension_dir="extension"):
+    """Remove only an empty retired extension or its sole bytecode cache."""
+    root = Path(extension_dir).absolute()
+    retired = root / "LLM_search_and_summary"
+    try:
+        # Preserve linked paths and any user files; no recursive deletion is needed.
+        if not retired.is_dir() or root.resolve() != root or retired.resolve() != retired:
+            return
+        entries = list(retired.iterdir())
+        if entries:
+            if len(entries) != 1 or entries[0].name != "__pycache__":
+                return
+            cache = entries[0]
+            if not cache.is_dir() or cache.resolve() != cache:
+                return
+            files = list(cache.iterdir())
+            if any(not path.is_file() or path.is_symlink() or path.suffix != ".pyc" for path in files):
+                return
+            for path in files:
+                path.unlink()
+            cache.rmdir()
+        retired.rmdir()
+    except OSError as error:
+        logger.warning("Could not remove retired extension cache %s: %s", retired, error)
 
 
 def main():
+    cleanup_retired_extension_cache()
     # - 0.0.5 更新操作
     # 如果原先用户开机启动中存在 start_record.bat，替换创建为新的 start_app.bat
     print("- 0.0.5 update routine")
@@ -33,14 +62,6 @@ def main():
     # 将所有之前的用户数据移动到 userdata 下
     file_utils.ensure_dir(config.userdata_dir)
 
-    if os.path.exists("userdata\\db"):
-        if file_utils.get_dir_size("userdata\\db") < 1024 * 1024:
-            # shutil.rmtree("userdata\\db")
-            try:
-                send2trash("userdata\\db")
-            except Exception as e:
-                print(e)
-
     move_filepath_list = [
         "videos",
         "db",
@@ -53,14 +74,17 @@ def main():
 
     for filepath in move_filepath_list:
         if os.path.exists(filepath):
+            if os.path.exists(os.path.join(config.userdata_dir, filepath)):
+                print(f"Preserving both legacy and current {filepath}; destination already exists.")
+                continue
             print(f"moving {filepath}")
             shutil.move(filepath, config.userdata_dir)
-    if os.path.exists("config\\config_user.json"):
+    if os.path.exists("config\\config_user.json") and not os.path.exists(
+        os.path.join(config.userdata_dir, "config_user.json")
+    ):
         print("migrate user config")
         shutil.move("config\\config_user.json", config.userdata_dir)
-    if os.path.exists("config"):
-        print("clean outdated config dir")
-        shutil.rmtree("config")
+    # Keep remaining legacy files: they may contain user customizations.
 
     # - 0.0.12 更新操作
     print("- 0.0.12 update routine")
