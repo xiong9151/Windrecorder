@@ -852,16 +852,26 @@ def compare_image_similarity_np(img1, img2, target_width=1280):
 
     整数倍缩放：scale = max(1, 原宽 // target_width)，保证整数倍缩放。
     例如 2560x1440 → 1280x720；1920x1080 不缩（1920//1280=1）。
-    """
-    h, w = img1.shape[:2]
-    scale = max(1, w // target_width)  # 整数倍缩放因子
-    small_w, small_h = w // scale, h // scale
 
-    g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-    if scale > 1:
-        g1 = cv2.resize(g1, (small_w, small_h), interpolation=cv2.INTER_AREA)
-        g2 = cv2.resize(g2, (small_w, small_h), interpolation=cv2.INTER_AREA)
+    两张图尺寸不同时各自缩放到自己的目标尺寸；若缩放后仍不一致则返回 0
+    （分辨率差异过大视为不相似，与上游 ORB 实现在尺寸不匹配时返回 0 的行为一致）。
+    """
+    if img1 is None or img2 is None:
+        return 0.0
+
+    def _to_small_gray(img):
+        h, w = img.shape[:2]
+        scale = max(1, w // target_width)
+        small_w, small_h = w // scale, h // scale
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if scale > 1:
+            g = cv2.resize(g, (small_w, small_h), interpolation=cv2.INTER_AREA)
+        return g
+
+    g1 = _to_small_gray(img1)
+    g2 = _to_small_gray(img2)
+    if g1.shape != g2.shape:
+        return 0.0
 
     diff = cv2.absdiff(g1, g2)
     similarity = 1.0 - float(diff.mean()) / 255.0
