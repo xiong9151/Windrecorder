@@ -116,8 +116,6 @@ def idle_maintain_process_main():
 
         # 压缩过期视频
         record.compress_outdated_videofiles(video_queue_batch=config.batch_size_compress_video_in_idle)
-        # 清理iframe目录
-        record.try_clean_iframe_dir_in_idle_routine()
         # 清理缓存文件夹
         record.try_empty_cache_dir_in_idle_routine()
         # 统计webui footer info
